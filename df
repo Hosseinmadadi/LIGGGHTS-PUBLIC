@@ -1,0 +1,2371 @@
+diff --git a/bondspackage/atom_vec_bond_gran.cpp b/bondspackage/atom_vec_bond_gran.cpp
+deleted file mode 100644
+index 8d02a33..0000000
+--- a/bondspackage/atom_vec_bond_gran.cpp
++++ /dev/null
+@@ -1,852 +0,0 @@
+-/* ----------------------------------------------------------------------
+-LIGGGHTS - LAMMPS Improved for General Granular and Granular Heat
+-Transfer Simulations
+-
+-www.liggghts.com | www.cfdem.com
+-Christoph Kloss, christoph.kloss@cfdem.com
+-
+-LIGGGHTS is based on LAMMPS
+-LAMMPS - Large-scale Atomic/Molecular Massively Parallel Simulator
+-http://lammps.sandia.gov, Sandia National Laboratories
+-Steve Plimpton, sjplimp@sandia.gov
+-
+-Copyright (2003) Sandia Corporation. Under the terms of Contract
+-DE-AC04-94AL85000 with Sandia Corporation, the U.S. Government retains
+-certain rights in this software. This software is distributed under
+-the GNU General Public License.
+-
+-See the README file in the top-level LAMMPS directory.
+-------------------------------------------------------------------------- */
+-
+-#include "stdlib.h"
+-#include "atom_vec_bond_gran.h"
+-#include "atom.h"
+-#include "domain.h"
+-#include "modify.h"
+-#include "fix.h"
+-#include "memory.h"
+-#include "error.h"
+-#include "comm.h"
+-#include "update.h"
+-
+-using namespace LAMMPS_NS;
+-
+-#define MIN(A,B) ((A) < (B)) ? (A) : (B)
+-#define MAX(A,B) ((A) > (B)) ? (A) : (B)
+-
+-#define DELTA 10000
+-
+-/* ---------------------------------------------------------------------- */
+-
+-AtomVecBondGran::AtomVecBondGran(LAMMPS *lmp, int narg, char **arg) :
+-  AtomVec(lmp, narg, arg)
+-{
+-  molecular = 1;
+-  bonds_allow = 1;
+-  mass_type = 1;
+-
+-  comm_x_only = comm_f_only = 1;
+-  size_forward = 3;
+-  size_reverse = 3;
+-
+-  size_border = 7;
+-  size_velocity = 3;
+-  size_data_atom = 6;
+-  size_data_vel = 4;
+-  xcol_data = 4;
+-
+-  atom->molecule_flag = 1;
+-
+-  fbpg = NULL;
+-}
+-
+-/* ---------------------------------------------------------------------- */
+-
+-void AtomVecBondGran::init()
+-{
+-  
+-  if(fbpg == NULL)
+-  {
+-      char **fixarg = new char*[3];
+-      fixarg[0] = (char *) "BOND_PROPAGATE";
+-      fixarg[1] = (char *) "all";
+-      fixarg[2] = (char *) "bond/propagate/gran";
+-      modify->add_fix(3,fixarg);
+-      delete [] fixarg;
+-  }
+-}
+-
+-/* ----------------------------------------------------------------------
+-   grow atom arrays
+-   n = 0 grows arrays by DELTA
+-   n > 0 allocates arrays to size n
+-------------------------------------------------------------------------- */
+-
+-void AtomVecBondGran::grow(int n)
+-{
+-  if (n == 0) nmax += DELTA;
+-  else nmax = n;
+-  atom->nmax = nmax;
+-
+-    tag = memory->grow(atom->tag,nmax,"atom:tag");
+-  type = memory->grow(atom->type,nmax,"atom:type");
+-  mask = memory->grow(atom->mask,nmax,"atom:mask");
+-  image = memory->grow(atom->image,nmax,"atom:image");
+-  x = memory->grow(atom->x,nmax,3,"atom:x");
+-  v = memory->grow(atom->v,nmax,3,"atom:v");
+-  f = memory->grow(atom->f,nmax*comm->nthreads,3,"atom:f");
+-  molecule = memory->grow(atom->molecule,nmax,"atom:molecule");
+-  nspecial = memory->grow(atom->nspecial,nmax,3,"atom:nspecial");
+-  special = memory->grow(atom->special,nmax,atom->maxspecial,"atom:special");
+-  num_bond = memory->grow(atom->num_bond,nmax,"atom:num_bond");
+-  bond_type = memory->grow(atom->bond_type,nmax,atom->bond_per_atom,"atom:bond_type");
+-  bond_atom = memory->grow(atom->bond_atom,nmax,atom->bond_per_atom,"atom:bond_atom");
+-
+-  if(atom->n_bondhist)
+-  {
+-     bond_hist = atom->bond_hist =
+-        memory->grow(atom->bond_hist,nmax,atom->bond_per_atom,atom->n_bondhist,"atom:bond_hist");
+-  }
+-
+-  if (atom->nextra_grow)
+-    for (int iextra = 0; iextra < atom->nextra_grow; iextra++)
+-      modify->fix[atom->extra_grow[iextra]]->grow_arrays(nmax);
+-}
+-
+-/* ----------------------------------------------------------------------
+-   reset local array ptrs
+-------------------------------------------------------------------------- */
+-
+-void AtomVecBondGran::grow_reset()
+-{
+-  tag = atom->tag; type = atom->type;
+-  mask = atom->mask; image = atom->image;
+-  x = atom->x; v = atom->v; f = atom->f;
+-  molecule = atom->molecule;
+-  nspecial = atom->nspecial; special = atom->special;
+-  num_bond = atom->num_bond; bond_type = atom->bond_type;
+-  bond_atom = atom->bond_atom;
+-  bond_hist = atom->bond_hist;
+-}
+-
+-/* ---------------------------------------------------------------------- */
+-
+-void AtomVecBondGran::copy(int i, int j, int delflag)
+-{
+-  int k,l;
+-
+-  tag[j] = tag[i];
+-  type[j] = type[i];
+-  mask[j] = mask[i];
+-  image[j] = image[i];
+-  x[j][0] = x[i][0];
+-  x[j][1] = x[i][1];
+-  x[j][2] = x[i][2];
+-  v[j][0] = v[i][0];
+-  v[j][1] = v[i][1];
+-  v[j][2] = v[i][2];
+-
+-  molecule[j] = molecule[i];
+-
+-  num_bond[j] = num_bond[i];
+-  for (k = 0; k < num_bond[j]; k++) {
+-    bond_type[j][k] = bond_type[i][k];
+-    bond_atom[j][k] = bond_atom[i][k];
+-  }
+-
+-  if(atom->n_bondhist)
+-  {
+-      for (k = 0; k < num_bond[j]; k++)
+-         for (l =0; l < atom->n_bondhist; l++)
+-            bond_hist[j][k][l] = bond_hist[i][k][l];
+-  }
+-
+-  nspecial[j][0] = nspecial[i][0];
+-  nspecial[j][1] = nspecial[i][1];
+-  nspecial[j][2] = nspecial[i][2];
+-  for (k = 0; k < nspecial[j][2]; k++) special[j][k] = special[i][k];
+-
+-  if (atom->nextra_grow)
+-    for (int iextra = 0; iextra < atom->nextra_grow; iextra++)
+-      modify->fix[atom->extra_grow[iextra]]->copy_arrays(i,j);
+-}
+-
+-/* ---------------------------------------------------------------------- */
+-
+-int AtomVecBondGran::pack_comm(int n, int *list, double *buf,
+-			   int pbc_flag, int *pbc)
+-{
+-  int i,j,m;
+-  double dx,dy,dz;
+-
+-  m = 0;
+-  if (pbc_flag == 0) {
+-    for (i = 0; i < n; i++) {
+-      j = list[i];
+-      buf[m++] = x[j][0];
+-      buf[m++] = x[j][1];
+-      buf[m++] = x[j][2];
+-    }
+-  } else {
+-    if (domain->triclinic == 0) {
+-      dx = pbc[0]*domain->xprd;
+-      dy = pbc[1]*domain->yprd;
+-      dz = pbc[2]*domain->zprd;
+-    } else {
+-      dx = pbc[0]*domain->xprd + pbc[5]*domain->xy + pbc[4]*domain->xz;
+-      dy = pbc[1]*domain->yprd + pbc[3]*domain->yz;
+-      dz = pbc[2]*domain->zprd;
+-    }
+-    for (i = 0; i < n; i++) {
+-      j = list[i];
+-      buf[m++] = x[j][0] + dx;
+-      buf[m++] = x[j][1] + dy;
+-      buf[m++] = x[j][2] + dz;
+-    }
+-  }
+-  return m;
+-}
+-
+-/* ---------------------------------------------------------------------- */
+-
+-int AtomVecBondGran::pack_comm_vel(int n, int *list, double *buf,
+-			       int pbc_flag, int *pbc)
+-{
+-  int i,j,m;
+-  double dx,dy,dz,dvx,dvy,dvz;
+-
+-  m = 0;
+-  if (pbc_flag == 0) {
+-    for (i = 0; i < n; i++) {
+-      j = list[i];
+-      buf[m++] = x[j][0];
+-      buf[m++] = x[j][1];
+-      buf[m++] = x[j][2];
+-      buf[m++] = v[j][0];
+-      buf[m++] = v[j][1];
+-      buf[m++] = v[j][2];
+-    }
+-  } else {
+-    if (domain->triclinic == 0) {
+-      dx = pbc[0]*domain->xprd;
+-      dy = pbc[1]*domain->yprd;
+-      dz = pbc[2]*domain->zprd;
+-    } else {
+-      dx = pbc[0]*domain->xprd + pbc[5]*domain->xy + pbc[4]*domain->xz;
+-      dy = pbc[1]*domain->yprd + pbc[3]*domain->yz;
+-      dz = pbc[2]*domain->zprd;
+-    }
+-	if (!deform_vremap) {    
+-		for (i = 0; i < n; i++) {
+-		  j = list[i];
+-		  buf[m++] = x[j][0] + dx;
+-		  buf[m++] = x[j][1] + dy;
+-		  buf[m++] = x[j][2] + dz;
+-		  buf[m++] = v[j][0];
+-		  buf[m++] = v[j][1];
+-		  buf[m++] = v[j][2];
+-		}
+-    } else {
+-      dvx = pbc[0]*h_rate[0] + pbc[5]*h_rate[5] + pbc[4]*h_rate[4];
+-      dvy = pbc[1]*h_rate[1] + pbc[3]*h_rate[3];
+-      dvz = pbc[2]*h_rate[2];
+-      for (i = 0; i < n; i++) {
+-		j = list[i];
+-		buf[m++] = x[j][0] + dx;
+-		buf[m++] = x[j][1] + dy;
+-		buf[m++] = x[j][2] + dz;
+-		if (mask[i] & deform_groupbit) {
+-		  buf[m++] = v[j][0] + dvx;
+-		  buf[m++] = v[j][1] + dvy;
+-		  buf[m++] = v[j][2] + dvz;
+-		} else {
+-		  buf[m++] = v[j][0];
+-		  buf[m++] = v[j][1];
+-		  buf[m++] = v[j][2];
+-		}
+-      }
+-    }
+-  }
+-  return m;
+-}
+-
+-/* ---------------------------------------------------------------------- */
+-
+-void AtomVecBondGran::unpack_comm(int n, int first, double *buf)
+-{
+-  int i,m,last;
+-
+-  m = 0;
+-  last = first + n;
+-  for (i = first; i < last; i++) {
+-    x[i][0] = buf[m++];
+-    x[i][1] = buf[m++];
+-    x[i][2] = buf[m++];
+-  }
+-}
+-
+-/* ---------------------------------------------------------------------- */
+-
+-void AtomVecBondGran::unpack_comm_vel(int n, int first, double *buf)
+-{
+-  int i,m,last;
+-
+-  m = 0;
+-  last = first + n;
+-  for (i = first; i < last; i++) {
+-    x[i][0] = buf[m++];
+-    x[i][1] = buf[m++];
+-    x[i][2] = buf[m++];
+-    v[i][0] = buf[m++];
+-    v[i][1] = buf[m++];
+-    v[i][2] = buf[m++];
+-  }
+-}
+-
+-/* ---------------------------------------------------------------------- */
+-
+-int AtomVecBondGran::pack_reverse(int n, int first, double *buf)
+-{
+-  int i,m,last;
+-
+-  m = 0;
+-  last = first + n;
+-  for (i = first; i < last; i++) {
+-    buf[m++] = f[i][0];
+-    buf[m++] = f[i][1];
+-    buf[m++] = f[i][2];
+-  }
+-  return m;
+-}
+-
+-/* ---------------------------------------------------------------------- */
+-
+-void AtomVecBondGran::unpack_reverse(int n, int *list, double *buf)
+-{
+-  int i,j,m;
+-
+-  m = 0;
+-  for (i = 0; i < n; i++) {
+-    j = list[i];
+-    f[j][0] += buf[m++];
+-    f[j][1] += buf[m++];
+-    f[j][2] += buf[m++];
+-  }
+-}
+-
+-/* ---------------------------------------------------------------------- */
+-
+-int AtomVecBondGran::pack_border(int n, int *list, double *buf,
+-			     int pbc_flag, int *pbc)
+-{
+-  int i,j,m;
+-  double dx,dy,dz;
+-
+-  m = 0;
+-  if (pbc_flag == 0) {
+-    for (i = 0; i < n; i++) {
+-      j = list[i];
+-      buf[m++] = x[j][0];
+-      buf[m++] = x[j][1];
+-      buf[m++] = x[j][2];
+-      buf[m++] = tag[j];
+-      buf[m++] = type[j];
+-      buf[m++] = mask[j];
+-      buf[m++] = molecule[j];
+-    }
+-  } else {
+-    if (domain->triclinic == 0) {
+-      dx = pbc[0]*domain->xprd;
+-      dy = pbc[1]*domain->yprd;
+-      dz = pbc[2]*domain->zprd;
+-    } else {
+-      dx = pbc[0];
+-      dy = pbc[1];
+-      dz = pbc[2];
+-    }
+-    for (i = 0; i < n; i++) {
+-      j = list[i];
+-      buf[m++] = x[j][0] + dx;
+-      buf[m++] = x[j][1] + dy;
+-      buf[m++] = x[j][2] + dz;
+-      buf[m++] = tag[j];
+-      buf[m++] = type[j];
+-      buf[m++] = mask[j];
+-      buf[m++] = molecule[j];
+-    }
+-  }
+-  return m;
+-}
+-
+-/* ---------------------------------------------------------------------- */
+-
+-int AtomVecBondGran::pack_border_vel(int n, int *list, double *buf,
+-				 int pbc_flag, int *pbc)
+-{
+-  int i,j,m;
+-  double dx,dy,dz,dvx,dvy,dvz;
+-
+-  m = 0;
+-  if (pbc_flag == 0) {
+-    for (i = 0; i < n; i++) {
+-      j = list[i];
+-      buf[m++] = x[j][0];
+-      buf[m++] = x[j][1];
+-      buf[m++] = x[j][2];
+-      buf[m++] = tag[j];
+-      buf[m++] = type[j];
+-      buf[m++] = mask[j];
+-      buf[m++] = molecule[j];
+-      buf[m++] = v[j][0];
+-      buf[m++] = v[j][1];
+-      buf[m++] = v[j][2];
+-    }
+-  } else {
+-    if (domain->triclinic == 0) {
+-      dx = pbc[0]*domain->xprd;
+-      dy = pbc[1]*domain->yprd;
+-      dz = pbc[2]*domain->zprd;
+-    } else {
+-      dx = pbc[0];
+-      dy = pbc[1];
+-      dz = pbc[2];
+-    }
+-	if (!deform_vremap) {
+-	 for (i = 0; i < n; i++) {
+-		  j = list[i];
+-		  buf[m++] = x[j][0] + dx;
+-		  buf[m++] = x[j][1] + dy;
+-		  buf[m++] = x[j][2] + dz;
+-		  buf[m++] = tag[j];
+-		  buf[m++] = type[j];
+-		  buf[m++] = mask[j];
+-		  buf[m++] = molecule[j];
+-		  buf[m++] = v[j][0];
+-		  buf[m++] = v[j][1];
+-		  buf[m++] = v[j][2];
+-		}
+-  } else {
+-      dvx = pbc[0]*h_rate[0] + pbc[5]*h_rate[5] + pbc[4]*h_rate[4];
+-      dvy = pbc[1]*h_rate[1] + pbc[3]*h_rate[3];
+-      dvz = pbc[2]*h_rate[2];
+-      for (i = 0; i < n; i++) {
+-		j = list[i];
+-		buf[m++] = x[j][0] + dx;
+-		buf[m++] = x[j][1] + dy;
+-		buf[m++] = x[j][2] + dz;
+-		buf[m++] = tag[j];
+-		buf[m++] = type[j];
+-		buf[m++] = mask[j];
+-		buf[m++] = molecule[j];
+-		if (mask[i] & deform_groupbit) {
+-		  buf[m++] = v[j][0] + dvx;
+-		  buf[m++] = v[j][1] + dvy;
+-		  buf[m++] = v[j][2] + dvz;
+-		} else {
+-		  buf[m++] = v[j][0];
+-		  buf[m++] = v[j][1];
+-		  buf[m++] = v[j][2];
+-		}
+-      }
+-    }
+-  }
+-  return m;
+-}
+-
+-/* ---------------------------------------------------------------------- */
+-
+-int AtomVecBondGran::pack_border_hybrid(int n, int *list, double *buf)
+-{
+-  int i,j,m;
+-
+-  m = 0;
+-  for (i = 0; i < n; i++) {
+-    j = list[i];
+-    buf[m++] = molecule[j];
+-  }
+-  return m;
+-}
+-
+-/* ---------------------------------------------------------------------- */
+-
+-void AtomVecBondGran::unpack_border(int n, int first, double *buf)
+-{
+-  int i,m,last;
+-
+-  m = 0;
+-  last = first + n;
+-  for (i = first; i < last; i++) {
+-    if (i == nmax) grow(0);
+-    x[i][0] = buf[m++];
+-    x[i][1] = buf[m++];
+-    x[i][2] = buf[m++];
+-    tag[i] = static_cast<int> (buf[m++]);
+-    type[i] = static_cast<int> (buf[m++]);
+-    mask[i] = static_cast<int> (buf[m++]);
+-    molecule[i] = static_cast<int> (buf[m++]);
+-  }
+-}
+-
+-/* ---------------------------------------------------------------------- */
+-
+-void AtomVecBondGran::unpack_border_vel(int n, int first, double *buf)
+-{
+-  int i,m,last;
+-
+-  m = 0;
+-  last = first + n;
+-  for (i = first; i < last; i++) {
+-    if (i == nmax) grow(0);
+-    x[i][0] = buf[m++];
+-    x[i][1] = buf[m++];
+-    x[i][2] = buf[m++];
+-    tag[i] = static_cast<int> (buf[m++]);
+-    type[i] = static_cast<int> (buf[m++]);
+-    mask[i] = static_cast<int> (buf[m++]);
+-    molecule[i] = static_cast<int> (buf[m++]);
+-    v[i][0] = buf[m++];
+-    v[i][1] = buf[m++];
+-    v[i][2] = buf[m++];
+-  }
+-}
+-
+-/* ---------------------------------------------------------------------- */
+-
+-int AtomVecBondGran::unpack_border_hybrid(int n, int first, double *buf)
+-{
+-  int i,m,last;
+-
+-  m = 0;
+-  last = first + n;
+-  for (i = first; i < last; i++)
+-    molecule[i] = static_cast<int> (buf[m++]);
+-  return m;
+-}
+-
+-/* ----------------------------------------------------------------------
+-   pack data for atom I for sending to another proc
+-   xyz must be 1st 3 values, so comm::exchange() can test on them
+-------------------------------------------------------------------------- */
+-
+-int AtomVecBondGran::pack_exchange(int i, double *buf)
+-{
+-  int k,l;
+-  
+-  int m = 1;
+-  buf[m++] = x[i][0];
+-  buf[m++] = x[i][1];
+-  buf[m++] = x[i][2];
+-  buf[m++] = v[i][0];
+-  buf[m++] = v[i][1];
+-  buf[m++] = v[i][2];
+-  buf[m++] = tag[i];
+-  buf[m++] = type[i];
+-  buf[m++] = mask[i];
+-  buf[m++] = image[i];
+-
+-  buf[m++] = molecule[i];
+-
+-  buf[m++] = num_bond[i];
+-  for (k = 0; k < num_bond[i]; k++) {
+-    buf[m++] = bond_type[i][k];
+-    buf[m++] = bond_atom[i][k];
+-  }
+-
+-  if(atom->n_bondhist)
+-  {
+-      for (k = 0; k < num_bond[i]; k++)
+-        for (l = 0; l < atom->n_bondhist; l++)
+-          buf[m++] = bond_hist[i][k][l];
+-  }
+-
+-  buf[m++] = nspecial[i][0];
+-  buf[m++] = nspecial[i][1];
+-  buf[m++] = nspecial[i][2];
+-  for (k = 0; k < nspecial[i][2]; k++) buf[m++] = special[i][k];
+-
+-  if (atom->nextra_grow)
+-    for (int iextra = 0; iextra < atom->nextra_grow; iextra++)
+-      m += modify->fix[atom->extra_grow[iextra]]->pack_exchange(i,&buf[m]);
+-
+-  buf[0] = m;
+-  return m;
+-}
+-
+-/* ---------------------------------------------------------------------- */
+-
+-int AtomVecBondGran::unpack_exchange(double *buf)
+-{
+-  int k,l;
+-
+-  int nlocal = atom->nlocal;
+-  if (nlocal == nmax) grow(0);
+-
+-  int m = 1;
+-  x[nlocal][0] = buf[m++];
+-  x[nlocal][1] = buf[m++];
+-  x[nlocal][2] = buf[m++];
+-  v[nlocal][0] = buf[m++];
+-  v[nlocal][1] = buf[m++];
+-  v[nlocal][2] = buf[m++];
+-  tag[nlocal] = static_cast<int> (buf[m++]);
+-  type[nlocal] = static_cast<int> (buf[m++]);
+-  mask[nlocal] = static_cast<int> (buf[m++]);
+-  image[nlocal] = static_cast<int> (buf[m++]);
+-
+-  molecule[nlocal] = static_cast<int> (buf[m++]);
+-
+-  num_bond[nlocal] = static_cast<int> (buf[m++]);
+-  for (k = 0; k < num_bond[nlocal]; k++) {
+-    bond_type[nlocal][k] = static_cast<int> (buf[m++]);
+-    bond_atom[nlocal][k] = static_cast<int> (buf[m++]);
+-  }
+-
+-  if(atom->n_bondhist)
+-  {
+-      for (k = 0; k < num_bond[nlocal]; k++)
+-        for (l = 0; l < atom->n_bondhist; l++)
+-          bond_hist[nlocal][k][l] = buf[m++];
+-  }
+-
+-  nspecial[nlocal][0] = static_cast<int> (buf[m++]);
+-  nspecial[nlocal][1] = static_cast<int> (buf[m++]);
+-  nspecial[nlocal][2] = static_cast<int> (buf[m++]);
+-  for (k = 0; k < nspecial[nlocal][2]; k++)
+-    special[nlocal][k] = static_cast<int> (buf[m++]);
+-
+-  if (atom->nextra_grow)
+-    for (int iextra = 0; iextra < atom->nextra_grow; iextra++)
+-      m += modify->fix[atom->extra_grow[iextra]]->
+-	unpack_exchange(nlocal,&buf[m]);
+-
+-  atom->nlocal++;
+-  return m;
+-}
+-
+-/* ----------------------------------------------------------------------
+-   size of restart data for all atoms owned by this proc
+-   include extra data stored by fixes
+-------------------------------------------------------------------------- */
+-
+-int AtomVecBondGran::size_restart()
+-{
+-  int i;
+-
+-  int nlocal = atom->nlocal;
+-  int n = 0;
+-  for (i = 0; i < nlocal; i++)
+-  {
+-    n += 13 + 2*num_bond[i];
+-
+-    if(atom->n_bondhist) n += 1/*num_bondhist*/ + num_bond[i] * num_bondhist/*bond_hist*/;
+-  }
+-
+-  if (atom->nextra_restart)
+-    for (int iextra = 0; iextra < atom->nextra_restart; iextra++)
+-      for (i = 0; i < nlocal; i++)
+-	n += modify->fix[atom->extra_restart[iextra]]->size_restart(i);
+-
+-  return n;
+-}
+-
+-/* ----------------------------------------------------------------------
+-   pack atom I's data for restart file including extra quantities
+-   xyz must be 1st 3 values, so that read_restart can test on them
+-   molecular types may be negative, but write as positive
+-------------------------------------------------------------------------- */
+-
+-int AtomVecBondGran::pack_restart(int i, double *buf)
+-{
+-  int k,l;
+-
+-  int m = 1;
+-  buf[m++] = x[i][0];
+-  buf[m++] = x[i][1];
+-  buf[m++] = x[i][2];
+-  buf[m++] = tag[i];
+-  buf[m++] = type[i];
+-  buf[m++] = mask[i];
+-  buf[m++] = image[i];
+-  buf[m++] = v[i][0];
+-  buf[m++] = v[i][1];
+-  buf[m++] = v[i][2];
+-
+-  buf[m++] = molecule[i];
+-
+-  buf[m++] = num_bond[i];
+-  for (k = 0; k < num_bond[i]; k++) {
+-    buf[m++] = MAX(bond_type[i][k],-bond_type[i][k]);
+-    buf[m++] = bond_atom[i][k];
+-  }
+-
+-  if(atom->n_bondhist)
+-  {
+-      buf[m++] = atom->n_bondhist;
+-      for (k = 0; k < num_bond[i]; k++)
+-         for (l = 0; l < atom->n_bondhist; l++)
+-            buf[m++] = bond_hist[i][k][l];
+-  }
+-
+-  if (atom->nextra_restart)
+-    for (int iextra = 0; iextra < atom->nextra_restart; iextra++)
+-      m += modify->fix[atom->extra_restart[iextra]]->pack_restart(i,&buf[m]);
+-
+-  buf[0] = m;
+-  return m;
+-}
+-
+-/* ----------------------------------------------------------------------
+-   unpack data for one atom from restart file including extra quantities
+-------------------------------------------------------------------------- */
+-
+-int AtomVecBondGran::unpack_restart(double *buf)
+-{
+-  int k,l;
+-
+-  int nlocal = atom->nlocal;
+-  if (nlocal == nmax) {
+-    grow(0);
+-    if (atom->nextra_store)
+-      atom->extra = memory->grow(atom->extra,nmax,atom->nextra_store,"atom:extra");
+-}
+-
+-  int m = 1;
+-  x[nlocal][0] = buf[m++];
+-  x[nlocal][1] = buf[m++];
+-  x[nlocal][2] = buf[m++];
+-  tag[nlocal] = static_cast<int> (buf[m++]);
+-  type[nlocal] = static_cast<int> (buf[m++]);
+-  mask[nlocal] = static_cast<int> (buf[m++]);
+-  image[nlocal] = static_cast<int> (buf[m++]);
+-  v[nlocal][0] = buf[m++];
+-  v[nlocal][1] = buf[m++];
+-  v[nlocal][2] = buf[m++];
+-
+-  molecule[nlocal] = static_cast<int> (buf[m++]);
+-
+-  num_bond[nlocal] = static_cast<int> (buf[m++]);
+-  for (k = 0; k < num_bond[nlocal]; k++) {
+-    bond_type[nlocal][k] = static_cast<int> (buf[m++]);
+-    bond_atom[nlocal][k] = static_cast<int> (buf[m++]);
+-  }
+-
+-  if(atom->n_bondhist)
+-  {
+-      if(atom->n_bondhist != static_cast<int>(buf[m++]))
+-          error->all(FLERR,"Íncompatibel restart file: file was created using a bond model with a different number of history values");
+-      for (k = 0; k < num_bond[nlocal]; k++)
+-         for (l = 0; l < atom->n_bondhist; l++)
+-            bond_hist[nlocal][k][l] = buf[m++];
+-  }
+-
+-  double **extra = atom->extra;
+-  if (atom->nextra_store) {
+-    int size = static_cast<int> (buf[0]) - m;
+-    for (int i = 0; i < size; i++) extra[nlocal][i] = buf[m++];
+-  }
+-
+-  atom->nlocal++;
+-  return m;
+-}
+-
+-/* ----------------------------------------------------------------------
+-   create one atom of itype at coord
+-   set other values to defaults
+-------------------------------------------------------------------------- */
+-
+-void AtomVecBondGran::create_atom(int itype, double *coord)
+-{
+-  int nlocal = atom->nlocal;
+-  if (nlocal == nmax) grow(0);
+-
+-  tag[nlocal] = 0;
+-  type[nlocal] = itype;
+-  x[nlocal][0] = coord[0];
+-  x[nlocal][1] = coord[1];
+-  x[nlocal][2] = coord[2];
+-  mask[nlocal] = 1;
+-  image[nlocal] = (512 << 20) | (512 << 10) | 512;
+-  v[nlocal][0] = 0.0;
+-  v[nlocal][1] = 0.0;
+-  v[nlocal][2] = 0.0;
+-
+-  molecule[nlocal] = 0;
+-  num_bond[nlocal] = 0;
+-  nspecial[nlocal][0] = nspecial[nlocal][1] = nspecial[nlocal][2] = 0;
+-
+-  atom->nlocal++;
+-}
+-
+-/* ----------------------------------------------------------------------
+-   unpack one line from Atoms section of data file
+-   initialize other atom quantities
+-------------------------------------------------------------------------- */
+-
+-void AtomVecBondGran::data_atom(double *coord, int imagetmp, char **values)
+-{
+-  int nlocal = atom->nlocal;
+-  if (nlocal == nmax) grow(0);
+-
+-  tag[nlocal] = atoi(values[0]);
+-  if (tag[nlocal] <= 0)
+-    error->one(FLERR,"Invalid atom ID in Atoms section of data file");
+-
+-  molecule[nlocal] = atoi(values[1]);
+-
+-  type[nlocal] = atoi(values[2]);
+-  if (type[nlocal] <= 0 || type[nlocal] > atom->ntypes)
+-    error->one(FLERR,"Invalid atom type in Atoms section of data file");
+-
+-  x[nlocal][0] = coord[0];
+-  x[nlocal][1] = coord[1];
+-  x[nlocal][2] = coord[2];
+-
+-  image[nlocal] = imagetmp;
+-
+-  mask[nlocal] = 1;
+-  v[nlocal][0] = 0.0;
+-  v[nlocal][1] = 0.0;
+-  v[nlocal][2] = 0.0;
+-  num_bond[nlocal] = 0;
+-
+-  atom->nlocal++;
+-}
+-
+-/* ----------------------------------------------------------------------
+-   unpack hybrid quantities from one line in Atoms section of data file
+-   initialize other atom quantities for this sub-style
+-------------------------------------------------------------------------- */
+-
+-int AtomVecBondGran::data_atom_hybrid(int nlocal, char **values)
+-{
+-  molecule[nlocal] = atoi(values[0]);
+-
+-  num_bond[nlocal] = 0;
+-
+-  return 1;
+-}
+-
+-/* ----------------------------------------------------------------------
+-   return # of bytes of allocated memory
+-------------------------------------------------------------------------- */
+-
+-bigint AtomVecBondGran::memory_usage()
+-{
+-  bigint bytes = 0.0;
+-
+-  if (atom->memcheck("tag")) bytes += memory->usage(tag,nmax);
+-  if (atom->memcheck("type")) bytes += memory->usage(type,nmax);
+-  if (atom->memcheck("mask")) bytes += memory->usage(mask,nmax);
+-  if (atom->memcheck("image")) bytes += memory->usage(image,nmax);
+-  if (atom->memcheck("x")) bytes += memory->usage(x,nmax,3);
+-  if (atom->memcheck("v")) bytes += memory->usage(v,nmax,3);
+-  if (atom->memcheck("f")) bytes += memory->usage(f,nmax*comm->nthreads,3);
+-  if (atom->memcheck("molecule")) bytes += memory->usage(molecule,nmax);
+-  if (atom->memcheck("nspecial")) bytes += memory->usage(nspecial,nmax,3);
+-  if (atom->memcheck("special"))  bytes += memory->usage(special,nmax,atom->maxspecial);
+-  if (atom->memcheck("num_bond")) bytes += memory->usage(num_bond,nmax);
+-  if (atom->memcheck("bond_type")) bytes += memory->usage(bond_type,nmax,atom->bond_per_atom);
+-  if (atom->memcheck("bond_atom")) bytes += memory->usage(bond_atom,nmax,atom->bond_per_atom);
+-  if(atom->n_bondhist) bytes += nmax*sizeof(int);  // P.F. not too sure about atom->n_bondhist
+-return bytes;
+-}
+\ No newline at end of file
+diff --git a/bondspackage/atom_vec_bond_gran.h b/bondspackage/atom_vec_bond_gran.h
+deleted file mode 100644
+index e2ddd60..0000000
+--- a/bondspackage/atom_vec_bond_gran.h
++++ /dev/null
+@@ -1,80 +0,0 @@
+-/* ----------------------------------------------------------------------
+-LIGGGHTS - LAMMPS Improved for General Granular and Granular Heat
+-Transfer Simulations
+-
+-www.liggghts.com | www.cfdem.com
+-Christoph Kloss, christoph.kloss@cfdem.com
+-
+-LIGGGHTS is based on LAMMPS
+-LAMMPS - Large-scale Atomic/Molecular Massively Parallel Simulator
+-http://lammps.sandia.gov, Sandia National Laboratories
+-Steve Plimpton, sjplimp@sandia.gov
+-
+-Copyright (2003) Sandia Corporation. Under the terms of Contract
+-DE-AC04-94AL85000 with Sandia Corporation, the U.S. Government retains
+-certain rights in this software. This software is distributed under
+-the GNU General Public License.
+-
+-See the README file in the top-level LAMMPS directory.
+-------------------------------------------------------------------------- */
+-
+-#ifdef ATOM_CLASS
+-
+-AtomStyle(bond/gran,AtomVecBondGran)
+-
+-#else
+-
+-#ifndef LMP_ATOM_VEC_BOND_GRAN_H
+-#define LMP_ATOM_VEC_BOND_GRAN_H
+-
+-#include "atom_vec.h"
+-
+-namespace LAMMPS_NS {
+-
+-class AtomVecBondGran : public AtomVec {
+- public:
+-  AtomVecBondGran(class LAMMPS *, int, char **);
+-  //~AtomVecBondGran(){}; //NP P.F. Destructor needed?
+-  void init();
+-  void grow(int);
+-  void grow_reset();
+-  void copy(int, int, int);
+-  int pack_comm(int, int *, double *, int, int *);
+-  int pack_comm_vel(int, int *, double *, int, int *);
+-  void unpack_comm(int, int, double *);
+-  void unpack_comm_vel(int, int, double *);
+-  int pack_reverse(int, int, double *);
+-  void unpack_reverse(int, int *, double *);
+-  int pack_border(int, int *, double *, int, int *);
+-  int pack_border_vel(int, int *, double *, int, int *);
+-  int pack_border_hybrid(int, int *, double *);
+-  void unpack_border(int, int, double *);
+-  void unpack_border_vel(int, int, double *);
+-  int unpack_border_hybrid(int, int, double *);
+-  int pack_exchange(int, double *);
+-  int unpack_exchange(double *);
+-  int size_restart();
+-  int pack_restart(int, double *);
+-  int unpack_restart(double *);
+-  void create_atom(int, double *);
+-  void data_atom(double *, int, char **);
+-  int data_atom_hybrid(int, char **);
+-  bigint memory_usage();
+-
+- private:
+-  int *tag,*type,*mask,*image;
+-  double **x,**v,**f;
+-  int *molecule;
+-  int **nspecial,**special;
+-  int *num_bond;
+-  int **bond_type,**bond_atom;
+-  int num_bondhist;
+-  double ***bond_hist;
+-
+-  class FixBondPropagateGran *fbpg;
+-};
+-
+-}
+-
+-#endif
+-#endif
+diff --git a/bondspackage/bond_gran.cpp b/bondspackage/bond_gran.cpp
+deleted file mode 100644
+index 602d8a0..0000000
+--- a/bondspackage/bond_gran.cpp
++++ /dev/null
+@@ -1,509 +0,0 @@
+-/* ----------------------------------------------------------------------
+-   LIGGGHTS - LAMMPS Improved for General Granular and Granular Heat
+-   Transfer Simulations
+-
+-   LIGGGHTS is part of the CFDEMproject
+-   www.liggghts.com | www.cfdem.com
+-
+-   Christoph Kloss, christoph.kloss@cfdem.com
+-   Copyright 2009-2012 JKU Linz
+-   Copyright 2012-     DCS Computing GmbH, Linz
+-
+-   LIGGGHTS is based on LAMMPS
+-   LAMMPS - Large-scale Atomic/Molecular Massively Parallel Simulator
+-   http://lammps.sandia.gov, Sandia National Laboratories
+-   Steve Plimpton, sjplimp@sandia.gov
+-
+-   This software is distributed under the GNU General Public License.
+-
+-   See the README file in the top-level directory.
+-------------------------------------------------------------------------- */
+-
+-#include "math.h"
+-#include "stdlib.h"
+-#include "bond_gran.h"
+-#include "atom.h"
+-#include "neighbor.h"
+-#include "domain.h"
+-#include "comm.h"
+-#include "force.h"
+-#include "memory.h"
+-#include "modify.h"
+-#include "fix_property_atom.h"
+-#include "error.h"
+-#include "update.h"
+-#include "vector_liggghts.h"
+-
+-using namespace LAMMPS_NS;
+-
+-/*NP
+-large TODO list for granular bonds:  (could be a diploma thesis?)
+-
+-+ need a better dissipative formulation than the hardcoded
+-  'dissipate' value which produces plastic deformation
+-  need some vel-dependant damping
+-+ need to carefully debug and validate this bond style
+-  valiation against fix rigid
+-+ check whether run this bond style w/ or w/o gran pair style active,
+-  (neigh_modify command)
+-+ need to store bond radii per particle, not per type
+-+ parallel debugging and testing not yet done
+-+ need evtally implemetation
+-*/
+-
+-enum{
+-     BREAKSTYLE_SIMPLE,
+-     BREAKSTYLE_STRESS,
+-     BREAKSTYLE_STRESS_TEMP
+-    };
+-
+-/* ---------------------------------------------------------------------- */
+-
+-BondGran::BondGran(LAMMPS *lmp) : Bond(lmp)
+-{
+-    // we need 12 history values - the 6 forces and 6 torques from the last time-step
+-    n_granhistory(12);
+-    /*	NP
+-    /* number of entries in bondhistlist. bondhistlist[number of bond][number of value (from 0 to number given here)]
+-    /* so with this number you can modify how many pieces of information you savae with every bond
+-    /* following dependencies and processes for saving,copying,growing the bondhistlist: */
+-     
+-    /* NP
+-    /* gibt groesse der gespeicherten werte  pro bond wieder 
+-    /* neighbor.cpp:       memory->create(bondhistlist,maxbond,atom->n_bondhist,"neigh:bondhistlist");
+-    /* neigh_bond.cpp:     memory->grow(bondhistlist,maxbond,atom->n_bondhist,"neighbor:bondhistlist");
+-    /* bond.cpp: void Bond::n_granhistory(int nhist) {ngranhistory = nhist;     atom->n_bondhist = ngranhistory; if(){FLERR}}
+-    /* atom_vec_bond_gran.cpp:  memory->grow(atom->bond_hist,nmax,atom->bond_per_atom,atom->n_bondhist,"atom:bond_hist");
+-
+-    /* 
+-     */
+-    if(!atom->style_match("bond/gran"))
+-      error->all(FLERR,"A granular bond style can only be used together with atom style bond/gran");
+-    if(comm->me == 0)
+-        error->warning(FLERR,"Bond granular: This is a beta version - be careful!");
+-    fix_Temp = NULL;
+-}
+-
+-/* ---------------------------------------------------------------------- */
+-
+-BondGran::~BondGran()
+-{
+-  if (allocated) {
+-    memory->destroy(setflag);
+-    memory->destroy(rb);
+-    memory->destroy(Sn);
+-    memory->destroy(St);
+-    memory->destroy(r_break);
+-    memory->destroy(sigman_break);
+-    memory->destroy(tau_break);
+-    memory->destroy(T_break);
+-  }
+-}
+-
+-/* ---------------------------------------------------------------------- */
+-
+-void  BondGran::init_style()
+-{
+-    if(breakmode == BREAKSTYLE_STRESS_TEMP)
+-       fix_Temp = static_cast<FixPropertyAtom*>(modify->find_fix_property("Temp","property/atom","scalar",1,0,"bond gran"));
+-}
+-
+-/* ---------------------------------------------------------------------- */
+-
+-void BondGran::compute(int eflag, int vflag)
+-{
+-
+-  double rsq,r,rinv,rsqinv;
+-  double vr1,vr2,vr3,vnnr,vn1,vn2,vn3,vt1,vt2,vt3;
+-  double wr1,wr2,wr3,vtr1,vtr2,vtr3,vrel,tor1,tor2,tor3;
+-  double wnnr,wn1,wn2,wn3,wt1,wt2,wt3;
+-  double fs1,fs2,fs3;
+-
+-  int i1,i2,n,type;
+-  double delx,dely,delz,ebond;
+-  double dnforce[3],dtforce[3];
+-  double dntorque[3],dttorque[3];
+-  double rot;
+-  double A,J;
+-
+-  ebond = 0.0;
+-  if (eflag || vflag) ev_setup(eflag,vflag);
+-  else evflag = 0;
+-
+-  double **x = atom->x;
+-  double **v = atom->v;
+-  double **f = atom->f;
+-  double *radius = atom->radius;
+-  double **torque = atom->torque;
+-  int *tag = atom->tag; // tag of atom is their ID number
+-  double **omega = atom->omega;
+-  int **bondlist = neighbor->bondlist;
+-  double **bondhistlist = neighbor->bondhistlist;
+-
+-  int nbondlist = neighbor->nbondlist;
+-  int nlocal = atom->nlocal;
+-  int newton_bond = force->newton_bond;
+-  double dt = update->dt;
+-
+-  if(breakmode == BREAKSTYLE_STRESS_TEMP)
+-  {
+-      if(!fix_Temp) error->all(FLERR,"Internal error in BondGran");
+-      Temp = fix_Temp->vector_atom;
+-  }
+-
+-  for (n = 0; n < nbondlist; n++) {
+-    i1 = bondlist[n][0];
+-    i2 = bondlist[n][1];
+-    /*NL*/ //fprintf(screen,"ts %d: handling id %d and %d\n",update->ntimestep,tag[i1],tag[i2]);
+-    type = bondlist[n][2];
+-
+-    A = M_PI * rb[type] * rb[type];
+-    J = A * 0.5 * rb[type] * rb[type];
+-
+-    delx = x[i1][0] - x[i2][0];
+-    dely = x[i1][1] - x[i2][1];
+-    delz = x[i1][2] - x[i2][2];
+-    domain->minimum_image(delx,dely,delz);
+-
+-    rsq = delx*delx + dely*dely + delz*delz;
+-    rsqinv = 1./rsq;
+-    r = sqrt(rsq);
+-    rinv = 1./r;
+-
+-    /*NL*/ //fprintf(screen,"bondlist[n][3] %d, exec at ts %d\n",bondlist[n][3],update->ntimestep);
+-    //NP continue if bond is broken
+-    if(bondlist[n][3])
+-    {
+-        //NP fprintf(screen,"i1 %d i2 %d bondlist[n][3] %d\n",i1,i2,bondlist[n][3]);
+-        //NP fprintf(screen,"bondlist[n][3] %d, broken ts %d\n",bondlist[n][3],update->ntimestep);
+-        //NP error->all(FLERR,"broken");
+-        continue;
+-    }
+-
+-    // relative translational velocity
+-
+-        vr1 = v[i1][0] - v[i2][0];
+-        vr2 = v[i1][1] - v[i2][1];
+-        vr3 = v[i1][2] - v[i2][2];
+-
+-        // normal component
+-
+-        vnnr = vr1*delx + vr2*dely + vr3*delz;
+-        vn1 = delx*vnnr * rsqinv;
+-        vn2 = dely*vnnr * rsqinv;
+-        vn3 = delz*vnnr * rsqinv;
+-
+-        // tangential component
+-
+-        vt1 = vr1 - vn1;
+-        vt2 = vr2 - vn2;
+-        vt3 = vr3 - vn3;
+-
+-    // relative rotational velocity for shear
+-
+-        wr1 = (radius[i1]*omega[i1][0] + radius[i2]*omega[i2][0]) * rinv;
+-        wr2 = (radius[i1]*omega[i1][1] + radius[i2]*omega[i2][1]) * rinv;
+-        wr3 = (radius[i1]*omega[i1][2] + radius[i2]*omega[i2][2]) * rinv;
+-
+-        // relative velocities for shear
+-
+-        vtr1 = vt1 - (delz*wr2-dely*wr3);
+-        vtr2 = vt2 - (delx*wr3-delz*wr1);
+-        vtr3 = vt3 - (dely*wr1-delx*wr2);
+-
+-        // relative rotational velocity for torsion and bending
+-
+-        wr1 = (radius[i1]*omega[i1][0] - radius[i2]*omega[i2][0]) * rinv;
+-        wr2 = (radius[i1]*omega[i1][1] - radius[i2]*omega[i2][1]) * rinv;
+-        wr3 = (radius[i1]*omega[i1][2] - radius[i2]*omega[i2][2]) * rinv;
+-
+-        // normal component
+-
+-        wnnr = wr1*delx + wr2*dely + wr3*delz;
+-        wn1 = delx*wnnr * rsqinv;
+-        wn2 = dely*wnnr * rsqinv;
+-        wn3 = delz*wnnr * rsqinv;
+-
+-    //fprintf(screen,"omega[i1] %f %f %f, omega[i2] %f %f %f, wn %f %f %f\n",omega[i1][0],omega[i1][1],omega[i1][2],omega[i2][0],omega[i2][1],omega[i2][2],wn1,wn2,wn3);
+-
+-        // tangential component
+-
+-        wt1 = wr1 - wn1;
+-        wt2 = wr2 - wn2;
+-        wt3 = wr3 - wn3;
+-
+-    // calc change in normal forces
+-    dnforce[0] = - vn1 * Sn[type] * A * dt;
+-    dnforce[1] = - vn2 * Sn[type] * A * dt;
+-    dnforce[2] = - vn3 * Sn[type] * A * dt;
+-
+-        // calc change in shear forces
+-        dtforce[0] = - vtr1 * St[type] * A * dt;
+-        dtforce[1] = - vtr2 * St[type] * A * dt;
+-        dtforce[2] = - vtr3 * St[type] * A * dt;
+-
+-    // calc change in normal torque
+-    dntorque[0] = - wn1 * St[type] * J * dt;
+-    dntorque[1] = - wn2 * St[type] * J * dt;
+-    dntorque[2] = - wn3 * St[type] * J * dt;
+-
+-    // calc change in tang torque
+-    dttorque[0] = - wt1 * Sn[type] * J*0.5 * dt;
+-    dttorque[1] = - wt2 * Sn[type] * J*0.5 * dt;
+-    dttorque[2] = - wt3 * Sn[type] * J*0.5 * dt;
+-
+-    // rotate forces
+-
+-    //rotate normal force
+-        rot = bondhistlist[n][0]*delx + bondhistlist[n][1]*dely + bondhistlist[n][2]*delz;
+-        rot *= rsqinv;
+-    bondhistlist[n][0] = rot*delx;
+-    bondhistlist[n][1] = rot*dely;
+-    bondhistlist[n][2] = rot*delz;
+-
+-    //rotate tangential force
+-    rot = bondhistlist[n][3]*delx + bondhistlist[n][4]*dely + bondhistlist[n][5]*delz;
+-    rot *= rsqinv;
+-    bondhistlist[n][3] -= rot*delx;
+-    bondhistlist[n][4] -= rot*dely;
+-    bondhistlist[n][5] -= rot*delz;
+-
+-    //rotate normal torque
+-        rot = bondhistlist[n][6]*delx + bondhistlist[n][7]*dely + bondhistlist[n][8]*delz;
+-        rot *= rsqinv;
+-    bondhistlist[n][6] = rot*delx;
+-    bondhistlist[n][7] = rot*dely;
+-    bondhistlist[n][8] = rot*delz;
+-
+-    //rotate tangential torque
+-    rot = bondhistlist[n][9]*delx + bondhistlist[n][10]*dely + bondhistlist[n][11]*delz;
+-    rot *= rsqinv;
+-    bondhistlist[n][ 9] -= rot*delx;
+-    bondhistlist[n][10] -= rot*dely;
+-    bondhistlist[n][11] -= rot*delz;
+-
+-    //increment normal and tangential force and torque
+-    double dissipate = 0.995;
+-    bondhistlist[n][0] = dissipate * bondhistlist[n][0] + dnforce[0];
+-    bondhistlist[n][1] = dissipate * bondhistlist[n][1] + dnforce[1];
+-    bondhistlist[n][2] = dissipate * bondhistlist[n][2] + dnforce[2];
+-    bondhistlist[n][3] = dissipate * bondhistlist[n][3] + dtforce[0];
+-    bondhistlist[n][4] = dissipate * bondhistlist[n][4] + dtforce[1];
+-    bondhistlist[n][5] = dissipate * bondhistlist[n][5] + dtforce[2];
+-    bondhistlist[n][6] = dissipate * bondhistlist[n][6] + dntorque[0];
+-    bondhistlist[n][7] = dissipate * bondhistlist[n][7] + dntorque[1];
+-    bondhistlist[n][8] = dissipate * bondhistlist[n][8] + dntorque[2];
+-    bondhistlist[n][ 9] = dissipate * bondhistlist[n][ 9] + dttorque[0];
+-    bondhistlist[n][10] = dissipate * bondhistlist[n][10] + dttorque[1];
+-    bondhistlist[n][11] = dissipate * bondhistlist[n][11] + dttorque[2];
+-
+-        tor1 = - rinv * (dely*bondhistlist[n][5] - delz*bondhistlist[n][4]);
+-        tor2 = - rinv * (delz*bondhistlist[n][3] - delx*bondhistlist[n][5]);
+-        tor3 = - rinv * (delx*bondhistlist[n][4] - dely*bondhistlist[n][3]);
+-
+-        //flag breaking of bond if criterion met
+-    if(breakmode == BREAKSTYLE_SIMPLE)
+-    {
+-        if(r > 2. * r_break[type])
+-        {
+-            //NP fprintf(screen,"r %f, 2. * r_break[type] %f \n",r,2. * r_break[type]);
+-            bondlist[n][3] = 1;
+-            //NP error->all(FLERR,"broken");
+-        }
+-    }
+-    else //NP stress or stress_temp
+-    {
+-        double nforce_mag = vectorMag3D(&bondhistlist[n][0]);
+-        double tforce_mag = vectorMag3D(&bondhistlist[n][3]);
+-        double ntorque_mag = vectorMag3D(&bondhistlist[n][6]);
+-        double ttorque_mag = vectorMag3D(&bondhistlist[n][9]);
+-
+-        bool nstress = sigman_break[type] < (-nforce_mag/A + 2.*ttorque_mag/J*rb[type]);
+-        bool tstress = tau_break[type]    < (-tforce_mag/A +    ntorque_mag/J*rb[type]);
+-        bool toohot = false;
+-
+-        if(breakmode == BREAKSTYLE_STRESS_TEMP)
+-        {
+-            toohot = 0.5 * (Temp[i1] + Temp[i2]) > T_break[type];
+-            /*NL*/ //fprintf(screen,"Temp[i1] %f Temp[i2] %f, T_break[type] %f\n",Temp[i1],Temp[i2],T_break[type]);
+-        }
+-
+-        if(nstress || tstress || toohot)
+-        {
+-            bondlist[n][3] = 1;
+-            /*NL*/ //fprintf(screen,"broken bond at step %d\n",update->ntimestep);
+-            /*NL*/ //if(toohot)fprintf(screen,"   it was too hot\n");
+-            /*NL*/ //if(nstress)fprintf(screen,"   it was nstress\n");
+-            /*NL*/ //if(tstress)fprintf(screen,"   it was tstress\n");
+-        }
+-    }
+-
+-
+-        //NP fprintf(screen,"ts %d, particles %d %d - shear %f %f %f - tor %f %f %f\n",update->ntimestep,tag[i1],tag[i2],bondhistlist[n][3],bondhistlist[n][4],bondhistlist[n][5],tor1,tor2,tor3);
+-
+-    // energy
+-    //if (eflag) error->all(FLERR,"Granular bonds currently do not support energy calculation");
+-
+-    // apply force to each of 2 atoms
+-
+-    if (newton_bond || i1 < nlocal) {
+-      f[i1][0] += (bondhistlist[n][0] + bondhistlist[n][3]);
+-      f[i1][1] += (bondhistlist[n][1] + bondhistlist[n][4]);
+-      f[i1][2] += (bondhistlist[n][2] + bondhistlist[n][5]);
+-      torque[i1][0] += radius[i1]*tor1 + (bondhistlist[n][6] + bondhistlist[n][ 9]);
+-      torque[i1][1] += radius[i1]*tor2 + (bondhistlist[n][7] + bondhistlist[n][10]);
+-      torque[i1][2] += radius[i1]*tor3 + (bondhistlist[n][8] + bondhistlist[n][11]);
+-    }
+-
+-    if (newton_bond || i2 < nlocal) {
+-      f[i2][0] -= (bondhistlist[n][0] + bondhistlist[n][3]);
+-      f[i2][1] -= (bondhistlist[n][1] + bondhistlist[n][4]);
+-      f[i2][2] -= (bondhistlist[n][2] + bondhistlist[n][5]);
+-      torque[i2][0] += radius[i2]*tor1 - (bondhistlist[n][6] + bondhistlist[n][ 9]);
+-      torque[i2][1] += radius[i2]*tor2 - (bondhistlist[n][7] + bondhistlist[n][10]);
+-      torque[i2][2] += radius[i2]*tor3 - (bondhistlist[n][8] + bondhistlist[n][11]);
+-    }
+-
+-    //if (evflag) ev_tally(i1,i2,nlocal,newton_bond,ebond,0./*fbond*/,delx,dely,delz);
+-  }
+-}
+-
+-/* ---------------------------------------------------------------------- */
+-
+-void BondGran::allocate()
+-{
+-  allocated = 1;
+-  int n = atom->nbondtypes;
+-
+-  memory->create(rb,n+1,"bond:rb");
+-  memory->create(Sn,n+1,"bond:Sn");
+-  memory->create(St,n+1,"bond:St");
+-
+-  memory->create(r_break,(n+1),"bond:r_break");
+-  memory->create(sigman_break,(n+1),"bond:sigman_break");
+-  memory->create(tau_break,(n+1),"bond:tau_break");
+-  memory->create(T_break,(n+1),"bond:T_break");
+-
+-  memory->create(setflag,(n+1),"bond:setflag");
+-  for (int i = 1; i <= n; i++)
+-    setflag[i] = 0;
+-}
+-
+-/* ----------------------------------------------------------------------
+-   set coeffs for one or more types
+-------------------------------------------------------------------------- */
+-
+-void BondGran::coeff(int narg, char **arg)
+-{
+-  if(narg < 4)  error->all(FLERR,"Incorrect args for bond coefficients");
+-
+-  double rb_one = force->numeric(arg[1]);
+-  double Sn_one = force->numeric(arg[2]);
+-  double St_one = force->numeric(arg[3]);
+-
+-  /*NL*///fprintf(screen,"Sn %f, St%f\n",Sn_one,St_one);
+-
+-  if(force->numeric(arg[4]) == 0. )
+-  {
+-      breakmode = BREAKSTYLE_SIMPLE;
+-      if (narg != 6) error->all(FLERR,"Incorrect args for bond coefficients");
+-  }
+-  else if(force->numeric(arg[4]) == 1. )
+-  {
+-      breakmode = BREAKSTYLE_STRESS;
+-      if (narg != 7) error->all(FLERR,"Incorrect args for bond coefficients");
+-  }
+-  else if(force->numeric(arg[4]) == 2. )
+-  {
+-      breakmode = BREAKSTYLE_STRESS_TEMP;
+-      if (narg != 8) error->all(FLERR,"Incorrect args for bond coefficients");
+-  }
+-  else  error->all(FLERR,"Incorrect args for bond coefficients");
+-
+-  if (!allocated) allocate();
+-
+-  double r_break_one,sigman_break_one,tau_break_one,T_break_one;
+-
+-  if(breakmode == BREAKSTYLE_SIMPLE) r_break_one = force->numeric(arg[5]);
+-  else
+-  {
+-      sigman_break_one = force->numeric(arg[5]);
+-      tau_break_one = force->numeric(arg[6]);
+-      if(breakmode == BREAKSTYLE_STRESS_TEMP) T_break_one = force->numeric(arg[7]);
+-  }
+-
+-  int ilo,ihi;
+-  force->bounds(arg[0],atom->nbondtypes,ilo,ihi);
+-  int count = 0;
+-  for (int i = ilo; i <= ihi; i++) {
+-    rb[i] = rb_one;
+-    Sn[i] = Sn_one;
+-    St[i] = St_one;
+-    if(breakmode == BREAKSTYLE_SIMPLE) r_break[i] = r_break_one;
+-    else
+-    {
+-        sigman_break[i] = sigman_break_one;
+-        tau_break[i] = tau_break_one;
+-        if(breakmode == BREAKSTYLE_STRESS_TEMP) T_break[i] = T_break_one;
+-    }
+-    setflag[i] = 1;
+-    count++;
+-  }
+-
+-  if (count == 0) error->all(FLERR,"Incorrect args for bond coefficients - or the bonds are not initialized in create_atoms");
+-}
+-
+-/* ----------------------------------------------------------------------
+-   return an equilbrium bond length
+-------------------------------------------------------------------------- */
+-
+-double BondGran::equilibrium_distance(int i)
+-{
+-  //NP ATTENTION: this is _not_ correct - and has implications on fix shake, pair_lj_cut_coul_long and pppm
+-  //NP it is not possible to define a general equilibrium distance for this bond model
+-  //NP as rotational degree of freedom is present
+-  return 0.;
+-}
+-
+-/* ----------------------------------------------------------------------
+-   proc 0 writes out coeffs to restart file
+-------------------------------------------------------------------------- */
+-
+-void BondGran::write_restart(FILE *fp)
+-{
+-  fwrite(&rb[1],sizeof(double),atom->nbondtypes,fp);
+-  fwrite(&Sn[1],sizeof(double),atom->nbondtypes,fp);
+-  fwrite(&St[1],sizeof(double),atom->nbondtypes,fp);
+-}
+-
+-/* ----------------------------------------------------------------------
+-   proc 0 reads coeffs from restart file, bcasts them
+-------------------------------------------------------------------------- */
+-
+-void BondGran::read_restart(FILE *fp)
+-{
+-  allocate();
+-
+-  if (comm->me == 0) {
+-    fread(&rb[1],sizeof(double),atom->nbondtypes,fp);
+-    fread(&Sn[1],sizeof(double),atom->nbondtypes,fp);
+-    fread(&St[1],sizeof(double),atom->nbondtypes,fp);
+-  }
+-  MPI_Bcast(&rb[1],atom->nbondtypes,MPI_DOUBLE,0,world);
+-  MPI_Bcast(&Sn[1],atom->nbondtypes,MPI_DOUBLE,0,world);
+-  MPI_Bcast(&St[1],atom->nbondtypes,MPI_DOUBLE,0,world);
+-
+-  for (int i = 1; i <= atom->nbondtypes; i++) setflag[i] = 1;
+-}
+-
+-/* ---------------------------------------------------------------------- */
+-
+-double BondGran::single(int type, double rsq, int i, int j)
+-{
+-  error->all(FLERR,"Bond granular does not support this feature");
+-  /*double r = sqrt(rsq);
+-  double dr = r - r0[type];
+-  double rk = k[type] * dr;
+-  return rk*dr;*/
+-  return 0.;
+-}
+diff --git a/bondspackage/bond_gran.h b/bondspackage/bond_gran.h
+deleted file mode 100644
+index bf8e0cf..0000000
+--- a/bondspackage/bond_gran.h
++++ /dev/null
+@@ -1,71 +0,0 @@
+-/* ----------------------------------------------------------------------
+-   LIGGGHTS - LAMMPS Improved for General Granular and Granular Heat
+-   Transfer Simulations
+-
+-   LIGGGHTS is part of the CFDEMproject
+-   www.liggghts.com | www.cfdem.com
+-
+-   Christoph Kloss, christoph.kloss@cfdem.com
+-   Copyright 2009-2012 JKU Linz
+-   Copyright 2012-     DCS Computing GmbH, Linz
+-
+-   LIGGGHTS is based on LAMMPS
+-   LAMMPS - Large-scale Atomic/Molecular Massively Parallel Simulator
+-   http://lammps.sandia.gov, Sandia National Laboratories
+-   Steve Plimpton, sjplimp@sandia.gov
+-
+-   This software is distributed under the GNU General Public License.
+-
+-   See the README file in the top-level directory.
+-------------------------------------------------------------------------- */
+-
+-#ifdef BOND_CLASS
+-
+-BondStyle(gran,BondGran)
+-
+-#else
+-
+-#ifndef LMP_BOND_GRAN_H
+-#define LMP_BOND_GRAN_H
+-
+-#include "stdio.h"
+-#include "bond.h"
+-
+-namespace LAMMPS_NS {
+-
+-class BondGran : public Bond {
+- public:
+-  BondGran(class LAMMPS *);
+-  ~BondGran();
+-  void init_style();
+-  void compute(int, int);
+-  void coeff(int, char **);
+-  double equilibrium_distance(int);
+-  void write_restart(FILE *);
+-  void read_restart(FILE *);
+-  double single(int, double, int, int);
+-
+- protected:
+-  int breakmode;
+-  double *rb,*Sn,*St;
+-  double *r_break,*sigman_break,*tau_break,*T_break;
+-  void allocate();
+-  //double dirvec[2][3]; P.F.
+-
+-  class FixPropertyAtom *fix_Temp;
+-  double *Temp;
+-
+-};
+-
+-}
+-
+-#endif
+-#endif
+-
+-/* ERROR/WARNING messages:
+-
+-E: Incorrect args for bond coefficients
+-
+-Self-explanatory.  Check the input script or data file.
+-
+-*/
+diff --git a/bondspackage/bondsfalloncone/2mal17layerfallandbending.png b/bondspackage/bondsfalloncone/2mal17layerfallandbending.png
+deleted file mode 100644
+index 9657eb9..0000000
+Binary files a/bondspackage/bondsfalloncone/2mal17layerfallandbending.png and /dev/null differ
+diff --git a/bondspackage/bondsfalloncone/Conemesh.stl b/bondspackage/bondsfalloncone/Conemesh.stl
+deleted file mode 100644
+index 78f72fe..0000000
+--- a/bondspackage/bondsfalloncone/Conemesh.stl
++++ /dev/null
+@@ -1,24488 +0,0 @@
+-solid
+- facet normal  9.336697e-01 -1.731035e-01  3.135219e-01
+-   outer loop
+-     vertex  5.835922e-02 -1.581760e-02  2.818606e+00
+-     vertex  5.561343e-02 -6.050300e-03  2.832175e+00
+-     vertex  3.890981e-02 -6.907622e-03  2.881445e+00
+-   endloop
+- endfacet
+- facet normal  8.878200e-01 -3.372266e-01  3.131354e-01
+-   outer loop
+-     vertex  5.341774e-02 -2.649671e-02  2.821115e+00
+-     vertex  5.835922e-02 -1.581760e-02  2.818606e+00
+-     vertex  3.175399e-02 -1.159308e-02  2.898588e+00
+-   endloop
+- endfacet
+- facet normal  9.176362e-01 -2.385783e-01  3.178430e-01
+-   outer loop
+-     vertex  3.890981e-02 -6.907622e-03  2.881445e+00
+-     vertex  3.175399e-02 -1.159308e-02  2.898588e+00
+-     vertex  5.835922e-02 -1.581760e-02  2.818606e+00
+-   endloop
+- endfacet
+- facet normal  9.431602e-01 -9.631589e-02  3.180755e-01
+-   outer loop
+-     vertex  3.890981e-02 -6.907622e-03  2.881445e+00
+-     vertex  5.561343e-02 -6.050300e-03  2.832175e+00
+-     vertex  3.125000e-02 -7.653790e-18  2.906250e+00
+-   endloop
+- endfacet
+- facet normal -9.042866e-01  2.881739e-01  3.149946e-01
+-   outer loop
+-     vertex -8.554355e-17  2.095144e-32  3.000000e+00
+-     vertex -7.863688e-03  3.339515e-03  2.974370e+00
+-     vertex -1.014120e-02  2.218903e-03  2.968857e+00
+-   endloop
+- endfacet
+- facet normal  2.571164e-01 -9.128723e-01  3.171045e-01
+-   outer loop
+-     vertex  6.614496e-03 -1.774620e-02  2.943184e+00
+-     vertex  3.421243e-03 -1.787059e-02  2.945415e+00
+-     vertex  1.072330e-02 -3.498031e-02  2.890239e+00
+-   endloop
+- endfacet
+- facet normal  9.464244e-01 -6.896693e-02  3.154748e-01
+-   outer loop
+-     vertex -8.554355e-17  2.095144e-32  3.000000e+00
+-     vertex  1.362764e-02 -1.996724e-03  2.958681e+00
+-     vertex  3.125000e-02 -7.653790e-18  2.906250e+00
+-   endloop
+- endfacet
+- facet normal  7.429382e-01 -5.905213e-01  3.151625e-01
+-   outer loop
+-     vertex  4.193159e-02 -3.882935e-02  2.828554e+00
+-     vertex  7.054006e-02 -4.747221e-02  2.744920e+00
+-     vertex  4.831995e-02 -3.276913e-02  2.824849e+00
+-   endloop
+- endfacet
+- facet normal  8.034903e-01 -5.087061e-01  3.092270e-01
+-   outer loop
+-     vertex -8.554355e-17  2.095144e-32  3.000000e+00
+-     vertex  7.768971e-04 -7.782534e-04  2.996701e+00
+-     vertex  1.118614e-02 -3.989257e-03  2.964371e+00
+-   endloop
+- endfacet
+- facet normal  6.320897e-01 -7.086186e-01  3.135638e-01
+-   outer loop
+-     vertex  2.028841e-02 -2.192596e-02  2.910382e+00
+-     vertex  2.501652e-02 -3.254542e-02  2.876853e+00
+-     vertex  4.193159e-02 -3.882935e-02  2.828554e+00
+-   endloop
+- endfacet
+- facet normal  7.253016e-01 -6.106002e-01  3.179700e-01
+-   outer loop
+-     vertex  2.916790e-02 -1.967808e-02  2.894445e+00
+-     vertex  2.028841e-02 -2.192596e-02  2.910382e+00
+-     vertex  4.193159e-02 -3.882935e-02  2.828554e+00
+-   endloop
+- endfacet
+- facet normal  4.716315e-01 -8.245834e-01  3.124516e-01
+-   outer loop
+-     vertex  2.520762e-02 -5.703220e-02  2.812936e+00
+-     vertex  3.629354e-02 -5.054178e-02  2.813331e+00
+-     vertex  1.809048e-02 -3.354160e-02  2.885673e+00
+-   endloop
+- endfacet
+- facet normal  2.890823e-01 -9.049270e-01  3.123114e-01
+-   outer loop
+-     vertex  1.240931e-02 -6.017735e-02  2.815669e+00
+-     vertex  2.520762e-02 -5.703220e-02  2.812936e+00
+-     vertex  1.072330e-02 -3.498031e-02  2.890239e+00
+-   endloop
+- endfacet
+- facet normal  3.678418e-01 -8.737593e-01  3.181776e-01
+-   outer loop
+-     vertex  1.809048e-02 -3.354160e-02  2.885673e+00
+-     vertex  1.072330e-02 -3.498031e-02  2.890239e+00
+-     vertex  2.520762e-02 -5.703220e-02  2.812936e+00
+-   endloop
+- endfacet
+- facet normal -1.996934e-01 -9.284296e-01  3.132747e-01
+-   outer loop
+-     vertex -1.128783e-02 -3.489370e-02  2.889978e+00
+-     vertex -3.928157e-03 -3.422160e-02  2.896661e+00
+-     vertex -4.306283e-03 -1.842271e-02  2.943242e+00
+-   endloop
+- endfacet
+- facet normal  9.142669e-01 -2.544139e-01  3.152611e-01
+-   outer loop
+-     vertex  2.294619e-02 -4.520049e-03  2.929839e+00
+-     vertex  1.118614e-02 -3.989257e-03  2.964371e+00
+-     vertex  3.175399e-02 -1.159308e-02  2.898588e+00
+-   endloop
+- endfacet
+- facet normal  6.676719e-01 -6.740402e-01  3.160443e-01
+-   outer loop
+-     vertex  1.145628e-02 -1.084279e-02  2.952679e+00
+-     vertex  4.542960e-03 -4.835150e-03  2.980096e+00
+-     vertex  2.028841e-02 -2.192596e-02  2.910382e+00
+-   endloop
+- endfacet
+- facet normal  8.724062e-01 -3.731239e-01  3.157309e-01
+-   outer loop
+-     vertex  3.175399e-02 -1.159308e-02  2.898588e+00
+-     vertex  2.002317e-02 -9.807984e-03  2.933111e+00
+-     vertex  5.341774e-02 -2.649671e-02  2.821115e+00
+-   endloop
+- endfacet
+- facet normal  6.102911e-01 -7.263728e-01  3.161129e-01
+-   outer loop
+-     vertex  2.028841e-02 -2.192596e-02  2.910382e+00
+-     vertex  7.125964e-03 -9.735754e-03  2.963805e+00
+-     vertex  2.501652e-02 -3.254542e-02  2.876853e+00
+-   endloop
+- endfacet
+- facet normal -9.657237e-03 -9.491469e-01  3.146855e-01
+-   outer loop
+-     vertex  3.191539e-03 -3.387528e-02  2.897924e+00
+-     vertex -8.554355e-17  2.095144e-32  3.000000e+00
+-     vertex -3.928157e-03 -3.422160e-02  2.896661e+00
+-   endloop
+- endfacet
+- facet normal  8.998948e-02 -9.456552e-01  3.124710e-01
+-   outer loop
+-     vertex -8.385042e-04 -6.146508e-02  2.815588e+00
+-     vertex  1.240931e-02 -6.017735e-02  2.815669e+00
+-     vertex  3.191539e-03 -3.387528e-02  2.897924e+00
+-   endloop
+- endfacet
+- facet normal -1.161116e-01 -9.428285e-01  3.123980e-01
+-   outer loop
+-     vertex -1.400361e-02 -5.952249e-02  2.816557e+00
+-     vertex -8.385042e-04 -6.146508e-02  2.815588e+00
+-     vertex -3.928157e-03 -3.422160e-02  2.896661e+00
+-   endloop
+- endfacet
+- facet normal -1.033045e-02 -9.479806e-01  3.181605e-01
+-   outer loop
+-     vertex  3.191539e-03 -3.387528e-02  2.897924e+00
+-     vertex -3.928157e-03 -3.422160e-02  2.896661e+00
+-     vertex -8.385042e-04 -6.146508e-02  2.815588e+00
+-   endloop
+- endfacet
+- facet normal -3.223509e-01 -8.938127e-01  3.117510e-01
+-   outer loop
+-     vertex -2.588779e-02 -5.255704e-02  2.824239e+00
+-     vertex -1.400361e-02 -5.952249e-02  2.816557e+00
+-     vertex -1.128783e-02 -3.489370e-02  2.889978e+00
+-   endloop
+- endfacet
+- facet normal -5.116847e-01 -8.009120e-01  3.109964e-01
+-   outer loop
+-     vertex -3.861037e-02 -4.737450e-02  2.816654e+00
+-     vertex -2.588779e-02 -5.255704e-02  2.824239e+00
+-     vertex -2.226065e-02 -3.290305e-02  2.880822e+00
+-   endloop
+- endfacet
+- facet normal -9.024246e-01 -2.936232e-01  3.153020e-01
+-   outer loop
+-     vertex -8.554355e-17  2.095144e-32  3.000000e+00
+-     vertex -1.745806e-02 -4.159732e-03  2.946160e+00
+-     vertex -7.792957e-03 -3.251053e-03  2.974668e+00
+-   endloop
+- endfacet
+- facet normal -2.043240e-01 -9.257752e-01  3.181070e-01
+-   outer loop
+-     vertex -3.928157e-03 -3.422160e-02  2.896661e+00
+-     vertex -1.128783e-02 -3.489370e-02  2.889978e+00
+-     vertex -1.400361e-02 -5.952249e-02  2.816557e+00
+-   endloop
+- endfacet
+- facet normal -8.980164e-01 -3.046901e-01  3.173808e-01
+-   outer loop
+-     vertex -1.758502e-02 -7.730370e-03  2.942373e+00
+-     vertex -1.745806e-02 -4.159732e-03  2.946160e+00
+-     vertex -3.471245e-02 -1.131483e-02  2.890470e+00
+-   endloop
+- endfacet
+- facet normal -7.090444e-01 -6.311056e-01  3.145818e-01
+-   outer loop
+-     vertex -2.548410e-02 -2.652032e-02  2.889660e+00
+-     vertex -1.302998e-02 -1.187323e-02  2.947115e+00
+-     vertex -2.775686e-02 -2.115388e-02  2.895303e+00
+-   endloop
+- endfacet
+- facet normal -6.812831e-01 -6.623465e-01  3.116898e-01
+-   outer loop
+-     vertex -4.635389e-02 -3.590650e-02  2.824098e+00
+-     vertex -3.861037e-02 -4.737450e-02  2.816654e+00
+-     vertex -2.548410e-02 -2.652032e-02  2.889660e+00
+-   endloop
+- endfacet
+- facet normal -8.104947e-01 -4.957656e-01  3.119532e-01
+-   outer loop
+-     vertex -5.563779e-02 -2.587490e-02  2.815919e+00
+-     vertex -4.635389e-02 -3.590650e-02  2.824098e+00
+-     vertex -3.228682e-02 -1.799517e-02  2.889111e+00
+-   endloop
+- endfacet
+- facet normal -9.316878e-01  1.838087e-01  3.133244e-01
+-   outer loop
+-     vertex -3.498367e-02  1.056957e-02  2.890364e+00
+-     vertex -3.430405e-02  3.423351e-03  2.896577e+00
+-     vertex -1.885251e-02  3.547457e-03  2.942450e+00
+-   endloop
+- endfacet
+- facet normal -8.996987e-01 -3.051504e-01  3.121304e-01
+-   outer loop
+-     vertex -6.020949e-02 -1.335549e-02  2.814981e+00
+-     vertex -5.563779e-02 -2.587490e-02  2.815919e+00
+-     vertex -3.471245e-02 -1.131483e-02  2.890470e+00
+-   endloop
+- endfacet
+- facet normal -9.442304e-01 -1.038573e-01  3.124781e-01
+-   outer loop
+-     vertex -6.122470e-02 -8.014985e-05  2.816326e+00
+-     vertex -6.020949e-02 -1.335549e-02  2.814981e+00
+-     vertex -3.377669e-02 -3.676852e-03  2.898071e+00
+-   endloop
+- endfacet
+- facet normal -9.259584e-01 -2.032745e-01  3.182459e-01
+-   outer loop
+-     vertex -3.471245e-02 -1.131483e-02  2.890470e+00
+-     vertex -3.377669e-02 -3.676852e-03  2.898071e+00
+-     vertex -6.020949e-02 -1.335549e-02  2.814981e+00
+-   endloop
+- endfacet
+- facet normal -8.685636e-01 -3.800759e-01  3.180245e-01
+-   outer loop
+-     vertex -3.228682e-02 -1.799517e-02  2.889111e+00
+-     vertex -3.471245e-02 -1.131483e-02  2.890470e+00
+-     vertex -5.563779e-02 -2.587490e-02  2.815919e+00
+-   endloop
+- endfacet
+- facet normal  1.921338e-01 -9.290340e-01  3.161967e-01
+-   outer loop
+-     vertex -8.554355e-17  2.095144e-32  3.000000e+00
+-     vertex  3.421243e-03 -1.787059e-02  2.945415e+00
+-     vertex  2.093615e-03 -9.419273e-03  2.971053e+00
+-   endloop
+- endfacet
+- facet normal -5.930578e-01 -7.397309e-01  3.179319e-01
+-   outer loop
+-     vertex -2.226065e-02 -3.290305e-02  2.880822e+00
+-     vertex -2.548410e-02 -2.652032e-02  2.889660e+00
+-     vertex -3.861037e-02 -4.737450e-02  2.816654e+00
+-   endloop
+- endfacet
+- facet normal  6.046165e-01 -7.312284e-01  3.158228e-01
+-   outer loop
+-     vertex  7.125964e-03 -9.735754e-03  2.963805e+00
+-     vertex  2.028841e-02 -2.192596e-02  2.910382e+00
+-     vertex  4.542960e-03 -4.835150e-03  2.980096e+00
+-   endloop
+- endfacet
+- facet normal -3.621949e-01 -8.775576e-01  3.141775e-01
+-   outer loop
+-     vertex -1.128783e-02 -3.489370e-02  2.889978e+00
+-     vertex -8.055930e-03 -1.935635e-02  2.937102e+00
+-     vertex -1.548505e-02 -3.075013e-02  2.896713e+00
+-   endloop
+- endfacet
+- facet normal -4.556217e-01 -8.313141e-01  3.183170e-01
+-   outer loop
+-     vertex -8.055930e-03 -1.935635e-02  2.937102e+00
+-     vertex -1.219089e-02 -1.760056e-02  2.935769e+00
+-     vertex -1.548505e-02 -3.075013e-02  2.896713e+00
+-   endloop
+- endfacet
+- facet normal -7.552331e-01 -5.734867e-01  3.173895e-01
+-   outer loop
+-     vertex -1.809693e-02 -1.181917e-02  2.935156e+00
+-     vertex -2.775686e-02 -2.115388e-02  2.895303e+00
+-     vertex -1.302998e-02 -1.187323e-02  2.947115e+00
+-   endloop
+- endfacet
+- facet normal  1.883759e-01 -9.291168e-01  3.182082e-01
+-   outer loop
+-     vertex  1.072330e-02 -3.498031e-02  2.890239e+00
+-     vertex  3.191539e-03 -3.387528e-02  2.897924e+00
+-     vertex  1.240931e-02 -6.017735e-02  2.815669e+00
+-   endloop
+- endfacet
+- facet normal -9.445474e-01  1.010437e-01  3.124428e-01
+-   outer loop
+-     vertex -5.999282e-02  1.307893e-02  2.815794e+00
+-     vertex -6.122470e-02 -8.014985e-05  2.816326e+00
+-     vertex -3.430405e-02  3.423351e-03  2.896577e+00
+-   endloop
+- endfacet
+- facet normal -8.990417e-01  3.073510e-01  3.118645e-01
+-   outer loop
+-     vertex -5.274159e-02  2.483210e-02  2.825115e+00
+-     vertex -5.999282e-02  1.307893e-02  2.815794e+00
+-     vertex -3.498367e-02  1.056957e-02  2.890364e+00
+-   endloop
+- endfacet
+- facet normal -9.292516e-01  1.880909e-01  3.179831e-01
+-   outer loop
+-     vertex -3.430405e-02  3.423351e-03  2.896577e+00
+-     vertex -3.498367e-02  1.056957e-02  2.890364e+00
+-     vertex -5.999282e-02  1.307893e-02  2.815794e+00
+-   endloop
+- endfacet
+- facet normal  1.715279e-01  9.339969e-01  3.134133e-01
+-   outer loop
+-     vertex  1.010852e-02  3.531422e-02  2.889803e+00
+-     vertex  3.030042e-03  3.433902e-02  2.896583e+00
+-     vertex  3.402111e-03  1.889416e-02  2.942406e+00
+-   endloop
+- endfacet
+- facet normal -8.095418e-01  4.979532e-01  3.109415e-01
+-   outer loop
+-     vertex -4.832517e-02  3.817916e-02  2.815239e+00
+-     vertex -5.274159e-02  2.483210e-02  2.825115e+00
+-     vertex -3.300268e-02  2.129819e-02  2.882165e+00
+-   endloop
+- endfacet
+- facet normal -6.749765e-01  6.685399e-01  3.121877e-01
+-   outer loop
+-     vertex -3.862118e-02  4.792946e-02  2.815340e+00
+-     vertex -4.832517e-02  3.817916e-02  2.815239e+00
+-     vertex -2.442105e-02  2.417609e-02  2.896909e+00
+-   endloop
+- endfacet
+- facet normal -7.441124e-01  5.872510e-01  3.184855e-01
+-   outer loop
+-     vertex -3.300268e-02  2.129819e-02  2.882165e+00
+-     vertex -2.442105e-02  2.417609e-02  2.896909e+00
+-     vertex -4.832517e-02  3.817916e-02  2.815239e+00
+-   endloop
+- endfacet
+- facet normal -3.003974e-01  9.001752e-01  3.153507e-01
+-   outer loop
+-     vertex -8.554355e-17  2.095144e-32  3.000000e+00
+-     vertex -4.314596e-03  1.736157e-02  2.946331e+00
+-     vertex -3.266438e-03  7.712964e-03  2.974872e+00
+-   endloop
+- endfacet
+- facet normal -5.099518e-01  8.016810e-01  3.118602e-01
+-   outer loop
+-     vertex -2.725593e-02  5.584435e-02  2.813578e+00
+-     vertex -3.862118e-02  4.792946e-02  2.815340e+00
+-     vertex -1.923369e-02  3.145763e-02  2.889385e+00
+-   endloop
+- endfacet
+- facet normal -3.202162e-01  8.944727e-01  3.120578e-01
+-   outer loop
+-     vertex -1.427030e-02  5.976589e-02  2.815662e+00
+-     vertex -2.725593e-02  5.584435e-02  2.813578e+00
+-     vertex -1.194404e-02  3.442894e-02  2.890674e+00
+-   endloop
+- endfacet
+- facet normal -4.055597e-01  8.567711e-01  3.185351e-01
+-   outer loop
+-     vertex -1.923369e-02  3.145763e-02  2.889385e+00
+-     vertex -1.194404e-02  3.442894e-02  2.890674e+00
+-     vertex -2.725593e-02  5.584435e-02  2.813578e+00
+-   endloop
+- endfacet
+- facet normal -1.186597e-01  9.424992e-01  3.124342e-01
+-   outer loop
+-     vertex -9.877074e-04  6.146580e-02  2.815579e+00
+-     vertex -1.427030e-02  5.976589e-02  2.815662e+00
+-     vertex -4.073117e-03  3.375167e-02  2.898010e+00
+-   endloop
+- endfacet
+- facet normal  8.752779e-02  9.459016e-01  3.124246e-01
+-   outer loop
+-     vertex  1.216633e-02  5.993939e-02  2.816515e+00
+-     vertex -9.877074e-04  6.146580e-02  2.815579e+00
+-     vertex  3.030042e-03  3.433902e-02  2.896583e+00
+-   endloop
+- endfacet
+- facet normal -1.443499e-02  9.479271e-01  3.181602e-01
+-   outer loop
+-     vertex -4.073117e-03  3.375167e-02  2.898010e+00
+-     vertex  3.030042e-03  3.433902e-02  2.896583e+00
+-     vertex -9.877074e-04  6.146580e-02  2.815579e+00
+-   endloop
+- endfacet
+- facet normal -2.173690e-01  9.226976e-01  3.184019e-01
+-   outer loop
+-     vertex -1.194404e-02  3.442894e-02  2.890674e+00
+-     vertex -4.073117e-03  3.375167e-02  2.898010e+00
+-     vertex -1.427030e-02  5.976589e-02  2.815662e+00
+-   endloop
+- endfacet
+- facet normal -5.845323e-01  7.460271e-01  3.190072e-01
+-   outer loop
+-     vertex -2.442105e-02  2.417609e-02  2.896909e+00
+-     vertex -1.923369e-02  3.145763e-02  2.889385e+00
+-     vertex -3.862118e-02  4.792946e-02  2.815340e+00
+-   endloop
+- endfacet
+- facet normal -8.851748e-01  3.427938e-01  3.145760e-01
+-   outer loop
+-     vertex -3.498367e-02  1.056957e-02  2.890364e+00
+-     vertex -1.786535e-02  6.500184e-03  2.942967e+00
+-     vertex -3.081343e-02  1.461010e-02  2.897695e+00
+-   endloop
+- endfacet
+- facet normal -7.461880e-01 -5.859447e-01  3.160258e-01
+-   outer loop
+-     vertex -4.377430e-03 -4.318674e-03  2.981552e+00
+-     vertex -1.024455e-02 -6.732277e-03  2.963224e+00
+-     vertex -1.302998e-02 -1.187323e-02  2.947115e+00
+-   endloop
+- endfacet
+- facet normal -3.176942e-01  8.934461e-01  3.175287e-01
+-   outer loop
+-     vertex -7.900575e-03  1.699006e-02  2.943789e+00
+-     vertex -4.314596e-03  1.736157e-02  2.946331e+00
+-     vertex -1.194404e-02  3.442894e-02  2.890674e+00
+-   endloop
+- endfacet
+- facet normal -8.767304e-01  3.628302e-01  3.157501e-01
+-   outer loop
+-     vertex -1.786535e-02  6.500184e-03  2.942967e+00
+-     vertex -7.863688e-03  3.339515e-03  2.974370e+00
+-     vertex -3.081343e-02  1.461010e-02  2.897695e+00
+-   endloop
+- endfacet
+- facet normal -6.162647e-01  7.216766e-01  3.152787e-01
+-   outer loop
+-     vertex -1.017062e-02  1.001378e-02  2.957181e+00
+-     vertex -1.220135e-02  1.702400e-02  2.937165e+00
+-     vertex -2.442105e-02  2.417609e-02  2.896909e+00
+-   endloop
+- endfacet
+- facet normal -4.551279e-01 -8.330219e-01  3.145363e-01
+-   outer loop
+-     vertex -8.055930e-03 -1.935635e-02  2.937102e+00
+-     vertex -3.989180e-03 -9.488172e-03  2.969122e+00
+-     vertex -1.219089e-02 -1.760056e-02  2.935769e+00
+-   endloop
+- endfacet
+- facet normal  2.918796e-01  9.041386e-01  3.119931e-01
+-   outer loop
+-     vertex  2.386372e-02  5.334590e-02  2.824679e+00
+-     vertex  1.216633e-02  5.993939e-02  2.816515e+00
+-     vertex  1.010852e-02  3.531422e-02  2.889803e+00
+-   endloop
+- endfacet
+- facet normal  4.834462e-01  8.181051e-01  3.114222e-01
+-   outer loop
+-     vertex  3.699595e-02  4.859119e-02  2.816784e+00
+-     vertex  2.386372e-02  5.334590e-02  2.824679e+00
+-     vertex  1.837647e-02  3.128673e-02  2.891147e+00
+-   endloop
+- endfacet
+- facet normal  7.927862e-01  5.168800e-01  3.229939e-01
+-   outer loop
+-     vertex  4.328549e-03  4.339010e-03  2.981613e+00
+-     vertex  6.279518e-03  2.593527e-03  2.979618e+00
+-     vertex  9.745611e-03  6.464686e-03  2.964916e+00
+-   endloop
+- endfacet
+- facet normal  9.101402e-01  2.688529e-01  3.152187e-01
+-   outer loop
+-     vertex  1.425131e-02  5.826980e-03  2.953810e+00
+-     vertex  1.998982e-02  3.847113e-03  2.938930e+00
+-     vertex  3.274664e-02  1.304535e-02  2.894252e+00
+-   endloop
+- endfacet
+- facet normal  6.553055e-01  6.878266e-01  3.122006e-01
+-   outer loop
+-     vertex  4.787072e-02  4.012077e-02  2.812619e+00
+-     vertex  3.699595e-02  4.859119e-02  2.816784e+00
+-     vertex  2.422697e-02  2.499365e-02  2.895575e+00
+-   endloop
+- endfacet
+- facet normal  7.907015e-01  5.271790e-01  3.112448e-01
+-   outer loop
+-     vertex  5.504275e-02  2.860429e-02  2.813905e+00
+-     vertex  4.787072e-02  4.012077e-02  2.812619e+00
+-     vertex  3.412288e-02  2.279529e-02  2.876890e+00
+-   endloop
+- endfacet
+- facet normal  7.346308e-01  5.990023e-01  3.186124e-01
+-   outer loop
+-     vertex  2.422697e-02  2.499365e-02  2.895575e+00
+-     vertex  3.412288e-02  2.279529e-02  2.876890e+00
+-     vertex  4.787072e-02  4.012077e-02  2.812619e+00
+-   endloop
+- endfacet
+- facet normal  5.716579e-01  7.559240e-01  3.190394e-01
+-   outer loop
+-     vertex  1.837647e-02  3.128673e-02  2.891147e+00
+-     vertex  2.422697e-02  2.499365e-02  2.895575e+00
+-     vertex  3.699595e-02  4.859119e-02  2.816784e+00
+-   endloop
+- endfacet
+- facet normal  8.839441e-01  3.477149e-01  3.126294e-01
+-   outer loop
+-     vertex  5.871296e-02  1.634540e-02  2.817163e+00
+-     vertex  5.504275e-02  2.860429e-02  2.813905e+00
+-     vertex  3.274664e-02  1.304535e-02  2.894252e+00
+-   endloop
+- endfacet
+- facet normal  9.330867e-01  1.764592e-01  3.133868e-01
+-   outer loop
+-     vertex  5.547699e-02  6.102418e-03  2.832565e+00
+-     vertex  5.871296e-02  1.634540e-02  2.817163e+00
+-     vertex  3.848698e-02  7.059949e-03  2.882613e+00
+-   endloop
+- endfacet
+- facet normal  9.126877e-01  2.561783e-01  3.183927e-01
+-   outer loop
+-     vertex  3.274664e-02  1.304535e-02  2.894252e+00
+-     vertex  3.848698e-02  7.059949e-03  2.882613e+00
+-     vertex  5.871296e-02  1.634540e-02  2.817163e+00
+-   endloop
+- endfacet
+- facet normal  9.428613e-01  9.883075e-02  3.181903e-01
+-   outer loop
+-     vertex  5.547699e-02  6.102418e-03  2.832565e+00
+-     vertex  3.848698e-02  7.059949e-03  2.882613e+00
+-     vertex  3.125000e-02 -7.653790e-18  2.906250e+00
+-   endloop
+- endfacet
+- facet normal  8.344806e-01  4.495754e-01  3.186284e-01
+-   outer loop
+-     vertex  3.412288e-02  2.279529e-02  2.876890e+00
+-     vertex  3.274664e-02  1.304535e-02  2.894252e+00
+-     vertex  5.504275e-02  2.860429e-02  2.813905e+00
+-   endloop
+- endfacet
+- facet normal  9.449704e-01  8.712770e-02  3.153406e-01
+-   outer loop
+-     vertex  3.848698e-02  7.059949e-03  2.882613e+00
+-     vertex  1.998982e-02  3.847113e-03  2.938930e+00
+-     vertex  3.125000e-02 -7.653790e-18  2.906250e+00
+-   endloop
+- endfacet
+- facet normal  7.398373e-01  5.941420e-01  3.156520e-01
+-   outer loop
+-     vertex  4.328549e-03  4.339010e-03  2.981613e+00
+-     vertex  9.745611e-03  6.464686e-03  2.964916e+00
+-     vertex  1.131640e-02  1.078749e-02  2.953097e+00
+-   endloop
+- endfacet
+- facet normal  3.164241e-01  8.947516e-01  3.151117e-01
+-   outer loop
+-     vertex  1.010852e-02  3.531422e-02  2.889803e+00
+-     vertex  6.406228e-03  1.812791e-02  2.942320e+00
+-     vertex  1.428361e-02  3.369711e-02  2.890202e+00
+-   endloop
+- endfacet
+- facet normal -7.851544e-01  5.357232e-01  3.106979e-01
+-   outer loop
+-     vertex -8.554355e-17  2.095144e-32  3.000000e+00
+-     vertex -4.277546e-03  4.368531e-03  2.981658e+00
+-     vertex -7.863688e-03  3.339515e-03  2.974370e+00
+-   endloop
+- endfacet
+- facet normal -5.718042e-01  7.566481e-01  3.170547e-01
+-   outer loop
+-     vertex -6.278127e-03  9.776645e-03  2.965143e+00
+-     vertex -1.220135e-02  1.702400e-02  2.937165e+00
+-     vertex -4.277546e-03  4.368531e-03  2.981658e+00
+-   endloop
+- endfacet
+- facet normal  4.258920e-01  8.474487e-01  3.169333e-01
+-   outer loop
+-     vertex  1.837647e-02  3.128673e-02  2.891147e+00
+-     vertex  1.428361e-02  3.369711e-02  2.890202e+00
+-     vertex  1.105478e-02  1.714052e-02  2.938811e+00
+-   endloop
+- endfacet
+- facet normal  7.343411e-01  6.020454e-01  3.135036e-01
+-   outer loop
+-     vertex  1.131640e-02  1.078749e-02  2.953097e+00
+-     vertex  1.934753e-02  1.286011e-02  2.930305e+00
+-     vertex  2.422697e-02  2.499365e-02  2.895575e+00
+-   endloop
+- endfacet
+- facet normal  1.762220e-01  9.315810e-01  3.179664e-01
+-   outer loop
+-     vertex  3.030042e-03  3.433902e-02  2.896583e+00
+-     vertex  1.010852e-02  3.531422e-02  2.889803e+00
+-     vertex  1.216633e-02  5.993939e-02  2.816515e+00
+-   endloop
+- endfacet
+- facet normal -1.522783e-02  9.490733e-01  3.146871e-01
+-   outer loop
+-     vertex  3.030042e-03  3.433902e-02  2.896583e+00
+-     vertex -4.073117e-03  3.375167e-02  2.898010e+00
+-     vertex -8.554355e-17  2.095144e-32  3.000000e+00
+-   endloop
+- endfacet
+- facet normal -9.480270e-01 -3.436303e-03  3.181713e-01
+-   outer loop
+-     vertex -3.377669e-02 -3.676852e-03  2.898071e+00
+-     vertex -3.430405e-02  3.423351e-03  2.896577e+00
+-     vertex -6.122470e-02 -8.014985e-05  2.816326e+00
+-   endloop
+- endfacet
+- facet normal -9.491849e-01 -4.255086e-03  3.146903e-01
+-   outer loop
+-     vertex -3.430405e-02  3.423351e-03  2.896577e+00
+-     vertex -3.377669e-02 -3.676852e-03  2.898071e+00
+-     vertex -8.554355e-17  2.095144e-32  3.000000e+00
+-   endloop
+- endfacet
+- facet normal  9.462057e-01 -7.222428e-02  3.154019e-01
+-   outer loop
+-     vertex  2.187500e-01 -5.357653e-17  2.343750e+00
+-     vertex  1.875000e-01 -4.592274e-17  2.437500e+00
+-     vertex  2.057744e-01 -3.159779e-02  2.375441e+00
+-   endloop
+- endfacet
+- facet normal  9.346289e-01 -1.737273e-01  3.103025e-01
+-   outer loop
+-     vertex  2.323761e-01 -6.286524e-02  2.277811e+00
+-     vertex  2.367457e-01 -2.514670e-02  2.285768e+00
+-     vertex  2.057744e-01 -3.159779e-02  2.375441e+00
+-   endloop
+- endfacet
+- facet normal  9.446308e-01 -6.541218e-02  3.215491e-01
+-   outer loop
+-     vertex  2.057744e-01 -3.159779e-02  2.375441e+00
+-     vertex  2.367457e-01 -2.514670e-02  2.285768e+00
+-     vertex  2.187500e-01 -5.357653e-17  2.343750e+00
+-   endloop
+- endfacet
+- facet normal  9.217880e-01 -2.440321e-01  3.012560e-01
+-   outer loop
+-     vertex  2.534927e-01 -9.774983e-02  2.184940e+00
+-     vertex  2.663945e-01 -4.107573e-02  2.191372e+00
+-     vertex  2.323761e-01 -6.286524e-02  2.277811e+00
+-   endloop
+- endfacet
+- facet normal  9.350989e-01 -1.743512e-01  3.085315e-01
+-   outer loop
+-     vertex  2.909941e-01 -7.915537e-02  2.095296e+00
+-     vertex  2.981147e-01 -3.137374e-02  2.100717e+00
+-     vertex  2.663945e-01 -4.107573e-02  2.191372e+00
+-   endloop
+- endfacet
+- facet normal  8.891022e-01 -3.454282e-01  3.002944e-01
+-   outer loop
+-     vertex  2.687068e-01 -1.388476e-01  2.092620e+00
+-     vertex  2.909941e-01 -7.915537e-02  2.095296e+00
+-     vertex  2.534927e-01 -9.774983e-02  2.184940e+00
+-   endloop
+- endfacet
+- facet normal  9.114601e-01 -2.449973e-01  3.304796e-01
+-   outer loop
+-     vertex  2.663945e-01 -4.107573e-02  2.191372e+00
+-     vertex  2.534927e-01 -9.774983e-02  2.184940e+00
+-     vertex  2.909941e-01 -7.915537e-02  2.095296e+00
+-   endloop
+- endfacet
+- facet normal  9.303483e-01 -1.756689e-01  3.218578e-01
+-   outer loop
+-     vertex  2.367457e-01 -2.514670e-02  2.285768e+00
+-     vertex  2.323761e-01 -6.286524e-02  2.277811e+00
+-     vertex  2.663945e-01 -4.107573e-02  2.191372e+00
+-   endloop
+- endfacet
+- facet normal  9.440422e-01 -6.492267e-02  3.233719e-01
+-   outer loop
+-     vertex  2.663945e-01 -4.107573e-02  2.191372e+00
+-     vertex  2.981147e-01 -3.137374e-02  2.100717e+00
+-     vertex  2.812500e-01 -6.888411e-17  2.156250e+00
+-   endloop
+- endfacet
+- facet normal  9.461855e-01 -7.251830e-02  3.153952e-01
+-   outer loop
+-     vertex  2.812500e-01 -6.888411e-17  2.156250e+00
+-     vertex  2.500000e-01 -6.123032e-17  2.250000e+00
+-     vertex  2.663945e-01 -4.107573e-02  2.191372e+00
+-   endloop
+- endfacet
+- facet normal  9.474882e-01 -5.017910e-02  3.158294e-01
+-   outer loop
+-     vertex  2.187500e-01 -5.357653e-17  2.343750e+00
+-     vertex  2.367457e-01 -2.514670e-02  2.285768e+00
+-     vertex  2.500000e-01 -6.123032e-17  2.250000e+00
+-   endloop
+- endfacet
+- facet normal  9.492280e-01 -6.149182e-02  3.085206e-01
+-   outer loop
+-     vertex  2.367457e-01 -2.514670e-02  2.285768e+00
+-     vertex  2.663945e-01 -4.107573e-02  2.191372e+00
+-     vertex  2.500000e-01 -6.123032e-17  2.250000e+00
+-   endloop
+- endfacet
+- facet normal  9.475049e-01 -4.982610e-02  3.158350e-01
+-   outer loop
+-     vertex  1.562500e-01 -3.826895e-17  2.531250e+00
+-     vertex  1.756230e-01 -1.852207e-02  2.470209e+00
+-     vertex  1.875000e-01 -4.592274e-17  2.437500e+00
+-   endloop
+- endfacet
+- facet normal  9.487385e-01 -6.055616e-02  3.102068e-01
+-   outer loop
+-     vertex  1.756230e-01 -1.852207e-02  2.470209e+00
+-     vertex  2.057744e-01 -3.159779e-02  2.375441e+00
+-     vertex  1.875000e-01 -4.592274e-17  2.437500e+00
+-   endloop
+- endfacet
+- facet normal  8.480924e-01 -4.386386e-01  2.972127e-01
+-   outer loop
+-     vertex  2.770918e-01 -1.844583e-01  2.001380e+00
+-     vertex  3.102630e-01 -1.195910e-01  2.002460e+00
+-     vertex  2.687068e-01 -1.388476e-01  2.092620e+00
+-   endloop
+- endfacet
+- facet normal  8.901921e-01 -3.457059e-01  2.967247e-01
+-   outer loop
+-     vertex  3.225158e-01 -1.668623e-01  1.910626e+00
+-     vertex  3.500571e-01 -9.469009e-02  1.912087e+00
+-     vertex  3.102630e-01 -1.195910e-01  2.002460e+00
+-   endloop
+- endfacet
+- facet normal  7.951630e-01 -5.296317e-01  2.953066e-01
+-   outer loop
+-     vertex  2.783168e-01 -2.334496e-01  1.910215e+00
+-     vertex  3.225158e-01 -1.668623e-01  1.910626e+00
+-     vertex  2.770918e-01 -1.844583e-01  2.001380e+00
+-   endloop
+- endfacet
+- facet normal  8.367036e-01 -4.334399e-01  3.347489e-01
+-   outer loop
+-     vertex  3.102630e-01 -1.195910e-01  2.002460e+00
+-     vertex  2.770918e-01 -1.844583e-01  2.001380e+00
+-     vertex  3.225158e-01 -1.668623e-01  1.910626e+00
+-   endloop
+- endfacet
+- facet normal  9.236596e-01 -2.451628e-01  2.945304e-01
+-   outer loop
+-     vertex  3.669803e-01 -1.415154e-01  1.820038e+00
+-     vertex  3.878490e-01 -5.955444e-02  1.822816e+00
+-     vertex  3.500571e-01 -9.469009e-02  1.912087e+00
+-   endloop
+- endfacet
+- facet normal  9.359361e-01 -1.751561e-01  3.055226e-01
+-   outer loop
+-     vertex  4.086940e-01 -1.111679e-01  1.729370e+00
+-     vertex  4.205684e-01 -4.435503e-02  1.731298e+00
+-     vertex  3.878490e-01 -5.955444e-02  1.822816e+00
+-   endloop
+- endfacet
+- facet normal  8.908267e-01 -3.465184e-01  2.938586e-01
+-   outer loop
+-     vertex  3.765755e-01 -1.945642e-01  1.728395e+00
+-     vertex  4.086940e-01 -1.111679e-01  1.729370e+00
+-     vertex  3.669803e-01 -1.415154e-01  1.820038e+00
+-   endloop
+- endfacet
+- facet normal  9.095571e-01 -2.430156e-01  3.371192e-01
+-   outer loop
+-     vertex  3.878490e-01 -5.955444e-02  1.822816e+00
+-     vertex  3.669803e-01 -1.415154e-01  1.820038e+00
+-     vertex  4.086940e-01 -1.111679e-01  1.729370e+00
+-   endloop
+- endfacet
+- facet normal  7.323084e-01 -6.145708e-01  2.933037e-01
+-   outer loop
+-     vertex  2.716572e-01 -2.848084e-01  1.819229e+00
+-     vertex  3.275662e-01 -2.181215e-01  1.819369e+00
+-     vertex  2.783168e-01 -2.334496e-01  1.910215e+00
+-   endloop
+- endfacet
+- facet normal  7.961734e-01 -5.301490e-01  2.916331e-01
+-   outer loop
+-     vertex  3.247475e-01 -2.724682e-01  1.728269e+00
+-     vertex  3.765755e-01 -1.945642e-01  1.728395e+00
+-     vertex  3.275662e-01 -2.181215e-01  1.819369e+00
+-   endloop
+- endfacet
+- facet normal  6.602268e-01 -6.922143e-01  2.914446e-01
+-   outer loop
+-     vertex  2.568108e-01 -3.372812e-01  1.728232e+00
+-     vertex  3.247475e-01 -2.724682e-01  1.728269e+00
+-     vertex  2.716572e-01 -2.848084e-01  1.819229e+00
+-   endloop
+- endfacet
+- facet normal  7.207031e-01 -6.049364e-01  3.385837e-01
+-   outer loop
+-     vertex  3.275662e-01 -2.181215e-01  1.819369e+00
+-     vertex  2.716572e-01 -2.848084e-01  1.819229e+00
+-     vertex  3.247475e-01 -2.724682e-01  1.728269e+00
+-   endloop
+- endfacet
+- facet normal  8.356455e-01 -4.328947e-01  3.380811e-01
+-   outer loop
+-     vertex  3.669803e-01 -1.415154e-01  1.820038e+00
+-     vertex  3.275662e-01 -2.181215e-01  1.819369e+00
+-     vertex  3.765755e-01 -1.945642e-01  1.728395e+00
+-   endloop
+- endfacet
+- facet normal  7.835623e-01 -5.221866e-01  3.366768e-01
+-   outer loop
+-     vertex  3.225158e-01 -1.668623e-01  1.910626e+00
+-     vertex  2.783168e-01 -2.334496e-01  1.910215e+00
+-     vertex  3.275662e-01 -2.181215e-01  1.819369e+00
+-   endloop
+- endfacet
+- facet normal  8.779257e-01 -3.418053e-01  3.352844e-01
+-   outer loop
+-     vertex  3.500571e-01 -9.469009e-02  1.912087e+00
+-     ve

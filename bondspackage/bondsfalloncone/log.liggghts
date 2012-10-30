@@ -1,0 +1,237 @@
+LIGGGHTS (Version LIGGGHTS-PFM 2.1.2, compiled 2012-10-30-14:04:41 by polyun based on LAMMPS 20 Apr 2012)
+#bond
+
+atom_style	hybrid granular bond/gran
+#atom_style	granular
+atom_modify	map array
+boundary	m m m
+newton		off
+
+communicate	single vel yes
+
+units		si
+
+region		reg block -0.08 0.05 -0.05 0.05 0. 0.15 units box
+create_box	1 reg bonds 1 8
+Created orthogonal box = (-0.08 -0.05 0) to (0.05 0.05 0.15)
+  1 by 1 by 1 MPI processor grid
+
+neighbor	0.003 bin
+neigh_modify	delay 0
+
+#New pair style
+#pair_style 	hybrid gran/hertz/history 1 0 
+#pair_coeff	* *
+#pair_style	hybrid lj/cut 11.0
+#pair_coeff	* * lj/cut 1.0 1.0 2.5
+pair_style 	gran/hertz/history #Hertzian without cohesion
+pair_coeff	* *
+
+#bond
+bond_style 	gran
+WARNING: Bond granular: This is a beta version - be careful! (bond_gran.cpp:83)
+
+#for simplebreak
+#bond_coeff 	1 0.0025 10000000000 10000000000 0 0.002501 
+#bond_coeff	bond_types	bonding_distance	normal_pressure tangential_pressure bond_style args (bondstyle) (sn,st) (sn,st,torque)
+bond_coeff 	1 0.0025 10000000000 10000000000 1 5000 15000
+
+
+########################################
+# Create Particles with start velocity #
+########################################
+#1D rod
+region		bc block -0.05	0.016 -0.000 0.003 0.038 0.040 units box
+#2D lattice
+#region		bc block -0.05	0.016 -0.000 0.015 0.038 0.040 units box
+#3D region
+#region		bc block -0.05	0.016 -0.000 0.015 0.038 0.045 units box # now running, but there is problem if more atoms join
+lattice		sc 0.005
+Lattice spacing in x,y,z = 0.005 0.005 0.005
+create_atoms	1 region bc
+Created 14 atoms
+group		bonded region bc
+14 atoms in group bonded
+set		group all density 2500 diameter 0.005
+  14 settings made for density
+  14 settings made for diameter
+set		group all vz -0.8 vx 0
+  14 settings made for vz
+  14 settings made for vx
+
+
+#Material properties required for new pair styles
+
+fix 		m1 all property/global youngsModulus peratomtype 5.e6
+fix 		m2 all property/global poissonsRatio peratomtype 0.45
+fix 		m3 all property/global coefficientRestitution peratomtypepair 1 0.5
+fix 		m4 all property/global coefficientFriction peratomtypepair 1 0.3
+fix 		m5 all property/global characteristicVelocity scalar 2.
+
+mass 		1 1.0
+special_bonds 	lj/coul 0 1 1 extra 8
+  0 = max # of 1-2 neighbors
+  8 = max # of special neighbors
+fix 		bondcr all bond/create/gran 10 1 1 0.0051 1 8
+
+
+timestep	0.00001
+
+fix		gravi all gravity 9.81 vector 0.0 0.0 -1
+
+##fix		zwalls all wall/gran/hertz/history 1 0 zplane 0.0 0.1 1
+###fix		cylwalls all wall/gran/hertz/history 1 0 zcylinder 0.05 1
+
+print 'SETTING WALLS'
+SETTING WALLS
+####### SETTING WALLS #######
+##fix		xwalls all wall/gran/hertz/history 1 0 xplane -0.08 0.05 1
+##fix		ywalls all wall/gran/hertz/history 1 0 yplane -0.05 0.05 1
+##fix		zwalls all wall/gran/hertz/history 1 0 zplane  0.0 0.15 1
+## NEW PFM STYLE ## fix xwalls all wall/gran/hertz/history primitive type 1 xplane -0.08
+
+## OFF WALLS for Test ## ##WALLS have to match PAIR STYLE##
+#fix x1walls all wall/gran/hertz/history primitive type 1 xplane -0.08
+#fix x2walls all wall/gran/hertz/history primitive type 1 xplane  0.05
+#fix y1walls all wall/gran/hertz/history primitive type 1 yplane -0.05
+#fix y2walls all wall/gran/hertz/history primitive type 1 yplane  0.05
+#fix z1walls all wall/gran/hertz/history primitive type 1 zplane  0.0
+fix z2walls all wall/gran/hertz/history primitive type 1 zplane  0.00
+
+############################
+print 'SETTING CONE'
+SETTING CONE
+###### SETTING CONE #####
+
+## STYLE PFM #### fix ID group-ID mesh/surface/stress file filename type walltype mesh_keywords mesh_values surface_keyword surface_values stress_keywords stress_values 
+## EXAMPLE PFM ## fix cad all mesh/surface/stress file mesh.stl type 1 wear finnie 
+
+#fix		cone all mesh/surface/stress file Conemesh.stl type 1 wear off
+
+###fix ID group-ID mesh/gran filename walltype scalefactor xoff yoff zoff phix phiy phiz (conveyor conveyor-values)
+#fix		wall all mesh/gran Conemesh.stl 1 0.01
+
+
+### STYLE PFM MESH WALL ###fix ID group-ID mesh/surface file filename type walltype mesh_keywords mesh_values surface_keyword surface_values 
+fix 		meshwall all mesh/surface file Conemesh.stl type 1 scale 0.01
+fix		granwalls all wall/gran/hertz/history mesh n_meshes 1 meshes meshwall
+
+###
+#########################
+
+print 'SETTING REGION'
+SETTING REGION
+
+#region and insertion
+
+group		nve_group region reg
+14 atoms in group nve_group
+#fix		ins nve_group pour 1800 1 1 vol 0.7 1000 diam uniform 0.005 0.005 dens uniform 2500 2500 vel uniform 0. 0. 0. 0. -0.5 region bc
+
+
+print 'APPLY nve integration to all particles that are inserted as single particles'
+APPLY nve integration to all particles that are inserted as single particles
+#apply nve integration to all particles that are inserted as single particles
+fix		integr nve_group nve/sphere
+
+print 'SETTING: output settings, include total thermal energy'
+SETTING: output settings, include total thermal energy
+#output settings, include total thermal energyg
+compute		1 all erotate/sphere
+variable	etotal equal ke+c_1
+thermo_style	custom step atoms ke c_1 v_etotal vol
+thermo		1000
+thermo_modify	lost ignore norm no
+compute_modify	thermo_temp dynamic yes
+
+print 'insert the first particles so that dump is not empty'
+insert the first particles so that dump is not empty
+#insert the first particles so that dump is not empty
+dump		dmp all custom 250 post/dump*.bondcone id type type x y z ix iy iz vx vy vz fx fy fz omegax omegay omegaz radius
+dump 		dumpstress all mesh/vtk 250 post/dumparea*.vtk stress
+
+print 'START RUN'
+START RUN
+#unfix gravi
+#insert particles
+run		10
+Memory usage per processor = 12.7037 Mbytes
+Step Atoms KinEng 1 etotal Volume 
+       0       14 0.00073303829            0 0.00073303829  0.001950195 
+      10       14 0.00073483716            0 0.00073483716  0.001950195 
+Loop time of 0.00393295 on 1 procs for 10 steps with 14 atoms
+
+Pair  time (%) = 1.95503e-05 (0.49709)
+Bond  time (%) = 1.00136e-05 (0.254607)
+Neigh time (%) = 0.000143051 (3.63725)
+Comm  time (%) = 9.29832e-06 (0.236421)
+Outpt time (%) = 4.79221e-05 (1.21848)
+Other time (%) = 0.00370312 (94.1562)
+
+Nlocal:    14 ave 14 max 14 min
+Histogram: 1 0 0 0 0 0 0 0 0 0
+Nghost:    0 ave 0 max 0 min
+Histogram: 1 0 0 0 0 0 0 0 0 0
+Neighs:    13 ave 13 max 13 min
+Histogram: 1 0 0 0 0 0 0 0 0 0
+
+Total # of neighbors = 13
+Ave neighs/atom = 0.928571
+Ave special neighs/atom = 0
+Neighbor list builds = 1
+Dangerous builds = 0
+fix_modify	bondcr every 1000
+print '10000 More Runs'
+10000 More Runs
+run		15000
+Memory usage per processor = 12.8563 Mbytes
+Step Atoms KinEng 1 etotal Volume 
+      10       14 0.00073483716            0 0.00073483716  0.001950195 
+INFO: more than 3 touching neighbor mesh elements found, growing contact history.
+    1000       14 0.00085433842 1.8930804e-07 0.00085452773  0.001950195 
+    2000       14 0.00083648463 7.4964641e-06 0.00084398109  0.001950195 
+INFO: more than 6 touching neighbor mesh elements found, growing contact history.
+    3000       14 0.00080004252 8.736541e-06 0.00080877906  0.001950195 
+    4000       14 0.00031434741 1.2054092e-05 0.0003264015  0.001950195 
+    5000       14 0.0001425397 6.7292071e-06 0.0001492689  0.001950195 
+    6000       14 0.00011753189 4.4047812e-06 0.00012193667  0.001950195 
+    7000       14 0.00011566886 3.9817888e-06 0.00011965065  0.001950195 
+    8000       14 0.00012936278 4.0121526e-06 0.00013337493  0.001950195 
+    9000       14 0.00015461993 5.0425465e-06 0.00015966247  0.001950195 
+   10000       14 5.6166346e-05 4.0232349e-06 6.0189581e-05  0.001950195 
+   11000       14 4.0746303e-05 2.056028e-06 4.2802331e-05  0.001950195 
+   12000       14 4.1684853e-05 1.7164505e-06 4.3401303e-05  0.001950195 
+   13000       14 4.7813596e-05 2.3817177e-06 5.0195314e-05  0.001950195 
+   14000       14 4.350822e-05 3.2107181e-06 4.6718938e-05  0.001950195 
+   15000       14 3.0482277e-05 3.1263338e-06 3.3608611e-05  0.001950195 
+   15010       14 2.6219091e-05 4.431308e-06 3.0650399e-05  0.001950195 
+Loop time of 2.03342 on 1 procs for 15000 steps with 14 atoms
+
+Pair  time (%) = 0.0120873 (0.594435)
+Bond  time (%) = 0.0170846 (0.840192)
+Neigh time (%) = 0.00420427 (0.206759)
+Comm  time (%) = 0.00389004 (0.191305)
+Outpt time (%) = 0.869082 (42.74)
+Other time (%) = 1.12707 (55.4273)
+
+Nlocal:    14 ave 14 max 14 min
+Histogram: 1 0 0 0 0 0 0 0 0 0
+Nghost:    0 ave 0 max 0 min
+Histogram: 1 0 0 0 0 0 0 0 0 0
+Neighs:    22 ave 22 max 22 min
+Histogram: 1 0 0 0 0 0 0 0 0 0
+
+Total # of neighbors = 22
+Ave neighs/atom = 1.57143
+Ave special neighs/atom = 0
+Neighbor list builds = 62
+Dangerous builds = 0
+
+#print 'START WIGGLE'
+#  wiggle, sample preparation
+#fix wigglecylin1 all move/mesh/gran wiggle 0 0.0 0.05 0.06 cone
+##fix ID group-ID move/mesh/gran wiggle args = Ax Ay Az period
+##fix ID group-ID move/mesh/gran style args keyword values meshgran_id ssf
+#run 10000
+
+#unfix wigglecylin1

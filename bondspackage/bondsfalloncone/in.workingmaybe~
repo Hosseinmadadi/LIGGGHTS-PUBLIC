@@ -1,0 +1,138 @@
+#bond
+
+atom_style	hybrid granular bond/gran
+#atom_style	granular
+atom_modify	map array
+boundary	m m m
+newton		off
+
+communicate	single vel yes
+
+units		si
+
+region		reg block -0.08 0.05 -0.05 0.05 0. 0.15 units box
+create_box	1 reg bonds 1 4
+
+neighbor	0.003 bin
+neigh_modify	delay 0
+
+#New pair style
+pair_style 	hybrid gran/hertz/history
+pair_coeff	* *
+#pair_style	hybrid lj/cut 11.0
+#pair_coeff	* * lj/cut 1.0 1.0 2.5
+#pair_style 	gran/hertz/history #Hertzian without cohesion
+#pair_coeff	* *
+
+#bond
+bond_style 	gran
+
+#for simplebreak
+bond_coeff 	1 0.0025 10000000000 10000000000 0 0.002501 
+#bond_coeff	bond_types	bonding_distance	normal_pressure tangential_pressure bond_style args (bondstyle) (sn,st) (sn,st,torque)
+#bond_coeff 	1 0.0025 10000000000 10000000000 1 1000 1000
+
+
+########################################
+# Create Particles with start velocity #
+########################################
+region		bc cylinder z 0.00 0.00 0.005 0.13 0.14 units box
+lattice		sc 0.005
+create_atoms	1 region bc
+group		bonded region bc
+set		group all density 2500 diameter 0.005 
+set		group all vz -1 vx 0
+
+
+#Material properties required for new pair styles
+
+fix 		m1 all property/global youngsModulus peratomtype 5.e6
+fix 		m2 all property/global poissonsRatio peratomtype 0.45
+fix 		m3 all property/global coefficientRestitution peratomtypepair 1 0.5
+fix 		m4 all property/global coefficientFriction peratomtypepair 1 0.3
+#fix 		m5 all property/global characteristicVelocity scalar 2.
+
+mass 		1 1.0
+#special_bonds 	lj/coul 0 1 1 extra 8
+fix 		bondcr all bond/create/gran 10 1 1 0.0051 1  6
+
+
+timestep	0.00001
+
+fix		gravi all gravity 9.81 vector 0.0 0.0 -1
+
+##fix		zwalls all wall/gran/hertz/history 1 0 zplane 0.0 0.1 1
+###fix		cylwalls all wall/gran/hertz/history 1 0 zcylinder 0.05 1
+
+print 'SETTING WALLS'
+####### SETTING WALLS #######
+##fix		xwalls all wall/gran/hertz/history 1 0 xplane -0.08 0.05 1
+##fix		ywalls all wall/gran/hertz/history 1 0 yplane -0.05 0.05 1
+##fix		zwalls all wall/gran/hertz/history 1 0 zplane  0.0 0.15 1
+## NEW PFM STYLE ## fix xwalls all wall/gran/hertz/history primitive type 1 xplane -0.08
+
+## OFF WALLS for Test ## ##WALLS have to match PAIR STYLE##
+#fix x1walls all wall/gran/hertz/history primitive type 1 xplane -0.08
+#fix x2walls all wall/gran/hertz/history primitive type 1 xplane  0.05
+#fix y1walls all wall/gran/hertz/history primitive type 1 yplane -0.05
+#fix y2walls all wall/gran/hertz/history primitive type 1 yplane  0.05
+#fix z1walls all wall/gran/hertz/history primitive type 1 zplane  0.0
+#fix z2walls all wall/gran/hertz/history primitive type 1 zplane  0.15
+
+############################
+print 'SETTING CONE'
+###### SETTING CONE #####
+
+## STYLE PFM #### fix ID group-ID mesh/surface/stress file filename type walltype mesh_keywords mesh_values surface_keyword surface_values stress_keywords stress_values 
+## EXAMPLE PFM ## fix cad all mesh/surface/stress file mesh.stl type 1 wear finnie 
+
+fix		cone all mesh/surface/stress file Conemesh.stl type 1 wear off
+
+###fix ID group-ID mesh/gran filename walltype scalefactor xoff yoff zoff phix phiy phiz (conveyor conveyor-values)
+##fix		wall all wall/gran/hertz/history 1 0 mesh/gran 1 cone
+#########################
+
+print 'SETTING REGION'
+
+#region and insertion
+
+group		nve_group region reg
+#fix		ins nve_group pour 1800 1 1 vol 0.7 1000 diam uniform 0.005 0.005 dens uniform 2500 2500 vel uniform 0. 0. 0. 0. -0.5 region bc
+
+
+print 'APPLY nve integration to all particles that are inserted as single particles'
+#apply nve integration to all particles that are inserted as single particles
+fix		integr nve_group nve/sphere
+
+print 'SETTING: output settings, include total thermal energy'
+#output settings, include total thermal energyg
+compute		1 all erotate/sphere
+variable	etotal equal ke+c_1
+thermo_style	custom step atoms ke c_1 v_etotal vol
+thermo		1000
+thermo_modify	lost ignore norm no
+compute_modify	thermo_temp dynamic yes
+
+print 'insert the first particles so that dump is not empty'
+#insert the first particles so that dump is not empty
+dump		dmp all custom 500 post/dump*.bondcone id type type x y z ix iy iz vx vy vz fx fy fz omegax omegay omegaz radius
+dump 		dumpstress all mesh/gran/VTK 500 post/dumparea*.vtk stress cone
+
+print 'START RUN'
+unfix gravi
+#insert particles
+run		10
+fix_modify	bondcr every 100
+print '10000 More Runs'
+dump_modify	dmp every 500
+run		10000
+
+print 'START WIGGLE'
+#  wiggle, sample preparation
+#fix wigglecylin1 all move/mesh/gran wiggle 0 0.0 0.05 0.06 cone
+##fix ID group-ID move/mesh/gran wiggle args = Ax Ay Az period
+##fix ID group-ID move/mesh/gran style args keyword values meshgran_id ssf
+run 40000
+
+#unfix wigglecylin1
+run 20000 

@@ -1,0 +1,115 @@
+#bond
+
+atom_style	hybrid granular bond/gran #need atomstyle bond/gran for granular bonds
+atom_modify	map array
+boundary	m m m
+newton		off
+
+communicate	single vel yes
+
+units		si
+
+region		reg block -0.08 0.05 -0.05 0.05 0. 0.15 units box
+create_box	1 reg bonds 1 8 #1 bond type, maximum 8 bonds per bond
+
+neighbor	0.003 bin
+neigh_modify	delay 0
+
+#New pair style
+pair_style 	gran/hertz/history #Hertzian without cohesion
+pair_coeff	* *
+
+#bond
+bond_style 	gran #granular bondstyle as defined in bond_gran.h
+variable	simplebreak equal 0
+variable	stressbreak equal 1
+
+#for simplebreak
+bond_coeff 	1 0.0025 10000000000 10000000000 ${simplebreak} 0.002501
+#for stressbreak
+#bond_coeff 	1 0.0025 10000000000 10000000000 ${stressbreak} 1000 1000
+
+
+#############################################################
+# Create Particles with start velocity in 1,2 or 3D lattice #
+#############################################################
+
+#	1D rod
+region		bc block -0.05	0.016 -0.000 0.003 0.038 0.040 units box
+#	2D lattice
+#region		bc block -0.05	0.016 -0.000 0.015 0.038 0.040 units box
+#	3D region
+#region		bc block -0.05	0.016 -0.000 0.015 0.038 0.045 units box # now running, but there is problem if more atoms join
+
+lattice		sc 0.005
+create_atoms	1 region bc
+group		bonded region bc
+set		group all density 2500 diameter 0.005
+set		group all vz -0.8 vx 0
+
+
+#Material properties required for new pair styles
+
+fix 		m1 all property/global youngsModulus peratomtype 5.e6
+fix 		m2 all property/global poissonsRatio peratomtype 0.45
+fix 		m3 all property/global coefficientRestitution peratomtypepair 1 0.5
+fix 		m4 all property/global coefficientFriction peratomtypepair 1 0.3
+fix 		m5 all property/global characteristicVelocity scalar 2.
+
+mass 		1 1.0
+special_bonds 	lj/coul 0 1 1 extra 8
+
+fix 		bondcr all bond/create/gran 10 1 1 0.0051 1 8 #Create Bonds after 10 timesteps, bondtype1, maximum bondnumber_per_atom=8
+
+timestep	0.00001
+fix		gravi all gravity 9.81 vector 0.0 0.0 -1
+
+#############################
+print 'SETTING WALLS'
+#############################
+fix z2walls all wall/gran/hertz/history primitive type 1 zplane  0.00
+
+############################
+print 'SETTING CONE'
+############################
+
+### STYLE PFM MESH WALL ###
+#fix 		ID group-ID mesh/surface file filename type walltype mesh_keywords mesh_values surface_keyword surface_values 
+
+fix 		meshwall all mesh/surface file Conemesh.stl type 1 scale 0.01
+fix		granwalls all wall/gran/hertz/history mesh n_meshes 1 meshes meshwall
+
+############################
+print 'SETTING REGION'
+############################
+group		nve_group region reg
+
+
+####################################################################################
+print 'APPLY nve integration to all particles that are inserted as single particles'
+####################################################################################
+fix		integr nve_group nve/sphere
+
+print 'SETTING: output settings, include total thermal energy'
+#output settings, include total thermal energyg
+compute		1 all erotate/sphere
+variable	etotal equal ke+c_1
+thermo_style	custom step atoms ke c_1 v_etotal vol
+thermo		1000
+thermo_modify	lost ignore norm no
+compute_modify	thermo_temp dynamic yes
+
+#######################
+print 'SETTING DUMP'
+#######################
+
+dump		dmp all custom 250 post/dump*.bondcone id type type x y z ix iy iz vx vy vz fx fy fz omegax omegay omegaz radius
+dump 		dumpstress all mesh/vtk 250 post/dumparea*.vtk stress
+
+
+####################
+print 'START RUN'
+####################
+run		10
+fix_modify	bondcr every 1000
+run		20000
